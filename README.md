@@ -28,7 +28,7 @@ matcher.py   - deterministic core, 3 passes (exact -> tolerance -> fuzzy),
                               |
                               v
 explainer.py - turns each exception into a plain-English explanation.
-               Uses Claude if ANTHROPIC_API_KEY is set, otherwise a
+               Uses Claude if AI_API_KEY is set, otherwise a
                template fallback - the pipeline always runs end to end.
                               |
                               v
