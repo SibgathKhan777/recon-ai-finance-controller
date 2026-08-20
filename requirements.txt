@@ -1,0 +1,4 @@
+pandas>=2.0
+streamlit>=1.30
+pytest>=7.4
+anthropic>=0.34.0
