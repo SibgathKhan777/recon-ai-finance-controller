@@ -111,7 +111,7 @@ Try in `agent_cli.py`:
 | `python cli.py run` | re-run the pipeline against already-generated data |
 | `python agent_cli.py` | interactive terminal chat across all four agents |
 | `streamlit run app.py` | dashboard: metrics, exception explorer, cash forecast chart, agent chat box |
-| `python -m pytest` | 30 unit tests across the matcher, scorer, and all four agents |
+| `python -m pytest` | 67 tests: unit tests across the matcher/scorer/agents, plus end-to-end user-journey tests that spawn the real CLI as subprocesses |
 
 ## Honest numbers, not a demo trick
 
@@ -215,7 +215,9 @@ agents/
   forecast_agent.py            cash forecast + at-risk amount
   exception_agent.py            exception triage / prioritization
   action_ledger.py               shared, bounded, gated audit trail
-tests/                     30 pytest tests across recon/ and agents/
+tests/                     67 pytest tests: unit-level across recon/ and agents/,
+                           plus test_user_journey.py -- real subprocess sessions
+                           that act as a user typing into cli.py / agent_cli.py
 ```
 
 ## Filling out the application form
