@@ -1,9 +1,12 @@
 """Deterministic + fuzzy matching engine.
 
-Three passes, cheapest and most trustworthy first:
+Four passes, cheapest and most trustworthy first:
   1. exact reference + exact amount
   2. exact reference + amount within tolerance (fees, rounding)
   3. fuzzy reference + amount tolerance + date window (timing drift, typo'd refs)
+  4. no reference at all -- amount+date is weak evidence, so this only
+     matches when exactly one candidate exists on each side; anything
+     ambiguous is flagged for manual review instead of guessed
 
 Anything left over becomes an exception. A final pass looks for unmatched
 pairs that share a reference but sit outside the tolerance band in a
@@ -20,6 +23,7 @@ DATE_WINDOW_DAYS = 3
 REF_SIMILARITY_THRESHOLD = 0.72
 DRIFT_MIN_CLUSTER = 3
 DRIFT_BAND_PCT = 0.005
+NO_REFERENCE_CONFIDENCE = 0.5
 
 
 def _within_tolerance(a, b):
@@ -28,6 +32,14 @@ def _within_tolerance(a, b):
 
 def _date_diff_days(d1, d2):
     return abs((datetime.fromisoformat(d1) - datetime.fromisoformat(d2)).days)
+
+
+def _has_ref(row):
+    """A blank/missing reference carries zero identifying information --
+    matching on it (== "") would silently cross-match unrelated
+    transactions that merely happen to lack a reference number, which is a
+    real, documented reconciliation failure mode, not a hypothetical one."""
+    return bool(str(row.get("txn_ref", "")).strip())
 
 
 def match(ledger_rows, settlement_rows):
@@ -43,13 +55,15 @@ def match(ledger_rows, settlement_rows):
         key = lambda r: r.get("settlement_id") or r.get("ledger_id") or ""
         return sorted((r for r in rows if not r["matched"]), key=key)
 
-    # Pass 1: exact ref + exact amount, same day (same-day is what makes this
-    # unambiguous — a same-ref/same-amount pair settled on a different day
-    # belongs in pass 3 as a timing mismatch, not here)
+    # Pass 1: exact ref + exact amount, same day. Requires a real reference —
+    # same-day is what makes this unambiguous when one exists.
     for lrow in unmatched(ledger):
+        if not _has_ref(lrow):
+            continue
         for srow in unmatched(settlement):
             if (
-                srow["txn_ref"] == lrow["txn_ref"]
+                _has_ref(srow)
+                and srow["txn_ref"] == lrow["txn_ref"]
                 and abs(srow["amount"] - lrow["amount"]) < 0.01
                 and _date_diff_days(lrow["date"], srow["date"]) == 0
             ):
@@ -60,9 +74,12 @@ def match(ledger_rows, settlement_rows):
 
     # Pass 2: exact ref, amount within tolerance (fees, rounding), same day
     for lrow in unmatched(ledger):
+        if not _has_ref(lrow):
+            continue
         for srow in unmatched(settlement):
             if (
-                srow["txn_ref"] == lrow["txn_ref"]
+                _has_ref(srow)
+                and srow["txn_ref"] == lrow["txn_ref"]
                 and _within_tolerance(lrow["amount"], srow["amount"])
                 and _date_diff_days(lrow["date"], srow["date"]) == 0
             ):
@@ -73,8 +90,12 @@ def match(ledger_rows, settlement_rows):
 
     # Pass 3: fuzzy ref, amount tolerance, date window (timing drift, typo'd refs)
     for lrow in unmatched(ledger):
+        if not _has_ref(lrow):
+            continue
         best, best_score = None, 0.0
         for srow in unmatched(settlement):
+            if not _has_ref(srow):
+                continue
             if _date_diff_days(lrow["date"], srow["date"]) > DATE_WINDOW_DAYS:
                 continue
             if not _within_tolerance(lrow["amount"], srow["amount"]):
@@ -88,9 +109,38 @@ def match(ledger_rows, settlement_rows):
             lrow["matched"] = True
             best["matched"] = True
 
-    matched_refs = {m["txn_ref"] for m in matches}
+    # Pass 4: no reference on either side. Amount+date alone is coincidental
+    # evidence, not identifying evidence -- only match when there's exactly
+    # one candidate on each side. Two unrelated customers who both happen to
+    # pay the same amount on the same day must NOT be silently cross-matched.
+    _match_unreferenced(unmatched(ledger), unmatched(settlement), matches)
+
+    matched_refs = {m["txn_ref"] for m in matches if m["txn_ref"]}
     exceptions = _build_exceptions(unmatched(ledger), unmatched(settlement), matched_refs)
     return matches, exceptions
+
+
+def _match_unreferenced(unmatched_ledger, unmatched_settlement, matches):
+    def key(row):
+        return (round(row["amount"], 2), row["date"])
+
+    ledger_groups = defaultdict(list)
+    for r in unmatched_ledger:
+        if not _has_ref(r):
+            ledger_groups[key(r)].append(r)
+
+    settlement_groups = defaultdict(list)
+    for r in unmatched_settlement:
+        if not _has_ref(r):
+            settlement_groups[key(r)].append(r)
+
+    for k, lrows in ledger_groups.items():
+        srows = settlement_groups.get(k, [])
+        if len(lrows) == 1 and len(srows) == 1:
+            lrow, srow = lrows[0], srows[0]
+            _record(matches, lrow, srow, "matched_no_reference", NO_REFERENCE_CONFIDENCE)
+            lrow["matched"] = True
+            srow["matched"] = True
 
 
 def _record(matches, lrow, srow, category, confidence):
@@ -105,36 +155,70 @@ def _record(matches, lrow, srow, category, confidence):
     })
 
 
+def _exception_row(row, side, category):
+    return {
+        "ledger_id": row["ledger_id"] if side == "ledger" else "",
+        "settlement_id": row["settlement_id"] if side == "settlement" else "",
+        "txn_ref": row["txn_ref"],
+        "amount": row["amount"],
+        "date": row["date"],
+        "category": category,
+        "side": side,
+    }
+
+
 def _build_exceptions(unmatched_ledger, unmatched_settlement, matched_refs):
+    referenced_settlement = [r for r in unmatched_settlement if _has_ref(r)]
+    referenced_ledger = [r for r in unmatched_ledger if _has_ref(r)]
+    unreferenced_settlement = [r for r in unmatched_settlement if not _has_ref(r)]
+    unreferenced_ledger = [r for r in unmatched_ledger if not _has_ref(r)]
+
     # A leftover settlement row is a duplicate either because a second unmatched
     # copy of the same ref exists (a retried batch that never matched at all),
     # or because this ref's ledger counterpart was already satisfied by a real
     # match elsewhere (the classic case: one clean pair + one surplus payout).
-    ref_counts = Counter(r["txn_ref"] for r in unmatched_settlement)
+    # Blank refs are excluded here -- two unrelated rows that both merely lack
+    # a reference are not "duplicates of each other".
+    ref_counts = Counter(r["txn_ref"] for r in referenced_settlement)
     dup_refs = {ref for ref, c in ref_counts.items() if c > 1} | (set(ref_counts) & matched_refs)
 
     exceptions = []
-    for srow in unmatched_settlement:
+    for srow in referenced_settlement:
         category = "duplicate_settlement" if srow["txn_ref"] in dup_refs else "missing_in_ledger"
-        exceptions.append({
-            "ledger_id": "",
-            "settlement_id": srow["settlement_id"],
-            "txn_ref": srow["txn_ref"],
-            "amount": srow["amount"],
-            "date": srow["date"],
-            "category": category,
-            "side": "settlement",
-        })
-    for lrow in unmatched_ledger:
-        exceptions.append({
-            "ledger_id": lrow["ledger_id"],
-            "settlement_id": "",
-            "txn_ref": lrow["txn_ref"],
-            "amount": lrow["amount"],
-            "date": lrow["date"],
-            "category": "missing_in_settlement",
-            "side": "ledger",
-        })
+        exceptions.append(_exception_row(srow, "settlement", category))
+    for lrow in referenced_ledger:
+        exceptions.append(_exception_row(lrow, "ledger", "missing_in_settlement"))
+
+    # Blank-reference rows: group by (amount, date). A group with more than
+    # one candidate on either side is genuinely ambiguous -- amount+date
+    # can't tell them apart, so none of them get auto-labeled "missing";
+    # they're flagged for manual review instead. A lone row with no
+    # counterpart at all is a real (if less certain) missing_in_*. The
+    # unambiguous 1-to-1 case was already matched in pass 4 and won't
+    # appear here at all.
+    def key(row):
+        return (round(row["amount"], 2), row["date"])
+
+    l_groups = defaultdict(list)
+    for r in unreferenced_ledger:
+        l_groups[key(r)].append(r)
+    s_groups = defaultdict(list)
+    for r in unreferenced_settlement:
+        s_groups[key(r)].append(r)
+
+    for k, lrows in l_groups.items():
+        srows = s_groups.get(k, [])
+        if srows and (len(lrows) > 1 or len(srows) > 1):
+            exceptions.extend(_exception_row(r, "ledger", "ambiguous_no_reference") for r in lrows)
+        elif not srows:
+            exceptions.extend(_exception_row(r, "ledger", "missing_in_settlement") for r in lrows)
+
+    for k, srows in s_groups.items():
+        lrows = l_groups.get(k, [])
+        if lrows and (len(lrows) > 1 or len(srows) > 1):
+            exceptions.extend(_exception_row(r, "settlement", "ambiguous_no_reference") for r in srows)
+        elif not lrows:
+            exceptions.extend(_exception_row(r, "settlement", "missing_in_ledger") for r in srows)
 
     _flag_batch_drift(exceptions)
     return exceptions

@@ -81,3 +81,54 @@ def test_batch_drift_detected_across_clustered_ratios():
     matches, exceptions = matcher.match(ledger, settlement)
     assert not matches
     assert all(e["category"] == "systematic_drift_suspected" for e in exceptions)
+
+
+def test_unambiguous_blank_reference_pair_still_matches_at_lower_confidence():
+    ledger = [_ledger("L1", "", "2026-01-01", 500.0)]
+    settlement = [_settlement("S1", "", "2026-01-01", 500.0)]
+    matches, exceptions = matcher.match(ledger, settlement)
+    assert len(matches) == 1
+    assert matches[0]["category"] == "matched_no_reference"
+    assert matches[0]["confidence"] < 1.0
+    assert not exceptions
+
+
+def test_ambiguous_blank_reference_rows_are_not_cross_matched():
+    # two genuinely different transactions, both missing a reference number,
+    # coincidentally the same amount and date -- must NOT be guessed at
+    ledger = [
+        _ledger("L1", "", "2026-01-01", 500.0),
+        _ledger("L2", "", "2026-01-01", 500.0),
+    ]
+    settlement = [
+        _settlement("S1", "", "2026-01-01", 500.0),
+        _settlement("S2", "", "2026-01-01", 500.0),
+    ]
+    matches, exceptions = matcher.match(ledger, settlement)
+    assert not matches, "ambiguous blank-ref rows must never be auto-matched"
+    assert len(exceptions) == 4
+    assert all(e["category"] == "ambiguous_no_reference" for e in exceptions)
+
+
+def test_blank_reference_with_no_counterpart_is_a_plain_exception():
+    ledger = [_ledger("L1", "", "2026-01-01", 500.0)]
+    settlement = []
+    matches, exceptions = matcher.match(ledger, settlement)
+    assert not matches
+    assert len(exceptions) == 1
+    assert exceptions[0]["category"] == "missing_in_settlement"
+
+
+def test_multiple_unrelated_blank_ref_settlements_are_not_flagged_as_duplicates():
+    # different amounts, different days -- these are just three unrelated
+    # rows that each happen to lack a reference number, not duplicates
+    ledger = []
+    settlement = [
+        _settlement("S1", "", "2026-01-01", 100.0),
+        _settlement("S2", "", "2026-01-05", 250.0),
+        _settlement("S3", "", "2026-01-10", 75.0),
+    ]
+    matches, exceptions = matcher.match(ledger, settlement)
+    assert not matches
+    assert len(exceptions) == 3
+    assert all(e["category"] == "missing_in_ledger" for e in exceptions)

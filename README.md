@@ -1,5 +1,7 @@
 # Ledger — a multi-agent AI Finance Controller
 
+![tests](https://github.com/SibgathKhan777/recon-ai-finance-controller/actions/workflows/tests.yml/badge.svg)
+
 An orchestrator agent that routes finance-ops questions to specialist
 agents — Reconciliation, Settlement Q&A, Cash Forecaster, and Exception &
 Anomaly — each grounded in real, scored data. No agent invents a number;
@@ -111,7 +113,7 @@ Try in `agent_cli.py`:
 | `python cli.py run` | re-run the pipeline against already-generated data |
 | `python agent_cli.py` | interactive terminal chat across all four agents |
 | `streamlit run app.py` | dashboard: metrics, exception explorer, cash forecast chart, agent chat box |
-| `python -m pytest` | 67 tests: unit tests across the matcher/scorer/agents, plus end-to-end user-journey tests that spawn the real CLI as subprocesses |
+| `python -m pytest` | 78 tests: unit tests across the matcher/scorer/agents, plus end-to-end user-journey tests that spawn the real CLI as subprocesses |
 
 ## Honest numbers, not a demo trick
 
@@ -146,7 +148,7 @@ didn't come from a scored pipeline run.
 
 ## What broke, and how I caught it
 
-Two real bugs, found by testing rather than assumed away.
+Real bugs, found by testing (and research) rather than assumed away.
 
 **1. A currency-drift batch, and the fix that catches it.** Run:
 
@@ -179,6 +181,40 @@ matching the stem (`reconcil\w*`) instead of the whole word. A reminder
 that a router built by pattern-matching keywords needs to be tested with
 the keywords a *user* would actually type, not the ones the author
 happened to write first.
+
+**3. Blank reference numbers could cause a false match.** Research into
+real reconciliation-system postmortems flagged missing/truncated reference
+fields as the single most common real-world failure mode. Tested directly:
+two *different* transactions with blank references, same amount, same day,
+got silently matched to each other at `confidence: 1.0` — the matcher did
+plain string equality on `txn_ref`, so `"" == ""` was treated exactly like
+a real matching reference. Fixed with a fourth matching pass: blank-ref
+rows only auto-match when there's exactly one candidate on each side
+sharing that amount+date; anything ambiguous (two candidates on either
+side) is now flagged `ambiguous_no_reference` for manual review instead of
+guessed. Also fixed a second-order bug this exposed: the duplicate-
+detection logic counted blank refs via a plain `Counter`, so multiple
+unrelated blank-ref rows were being flagged as "duplicates of each other"
+purely for sharing the empty string.
+
+**4. The audit trail never saw the matcher's own decisions.** The
+Reconciliation Agent's matches never reached `action_ledger` — only
+orchestrator-level actions (running the pipeline, forecasting) did. A
+low-confidence fuzzy match could get auto-accepted with no
+`needs_human_approval` flag, which undercuts the "every money action
+explainable, bounded and gated" bar this track is judged on. Fixed:
+`agents/orchestrator.py` now logs every non-trivial match (confidence < 1.0
+or amount above the approval threshold) to the ledger, and
+`action_ledger.record()` gates on confidence as well as amount — a large
+amount always needs a human regardless of match confidence, and a
+low-confidence match always needs one regardless of amount. Caveat, found
+while verifying this end to end rather than assumed: on the *default*
+demo dataset, every flagged entry today is amount-driven, not
+confidence-driven — synthetic corrupted-ref matches score ~0.92 similarity
+(a single-char typo out of 12 characters), comfortably above the 0.8 gate.
+The mechanism is correct and unit-tested against a constructed
+low-confidence match, but isn't visibly exercised by `python cli.py demo`
+as it stands.
 
 ## Known limitations
 

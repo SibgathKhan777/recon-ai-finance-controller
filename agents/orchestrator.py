@@ -7,7 +7,9 @@ set, the Q&A agent's open-ended answers get phrased by Claude instead of a
 template, but which specialist ran is decided by this deterministic router
 either way.
 """
+import csv
 import re
+from pathlib import Path
 
 from recon import pipeline
 from agents import action_ledger, exception_agent, forecast_agent, qa_agent
@@ -17,11 +19,14 @@ FORECAST_PATTERN = re.compile(r"\b(forecast|cash position|projected cash)\b", re
 TRIAGE_PATTERN = re.compile(r"\b(triage|prioriti[sz]e|what should i look at|summary of exceptions)\b", re.I)
 HORIZON_PATTERN = re.compile(r"(\d+)\s*day", re.I)
 
+MATCHES_PATH = Path(__file__).resolve().parent.parent / "reports" / "matches.csv"
+
 
 def handle(message):
     if RECONCILE_PATTERN.search(message):
         summary = pipeline.run()
         action_ledger.record("orchestrator", "ran_reconciliation", "full pipeline re-run on request")
+        _log_consequential_matches()
         return _format_summary(summary)
 
     if FORECAST_PATTERN.search(message):
@@ -39,6 +44,28 @@ def handle(message):
         return exception_agent.triage()
 
     return qa_agent.answer(message)
+
+
+def _log_consequential_matches():
+    """Every match the Reconciliation Agent made is a money decision --
+    log the ones actually worth a second look (not perfect, or large) to
+    the shared audit trail, letting action_ledger's own confidence/amount
+    gates decide whether each one needs human sign-off."""
+    if not MATCHES_PATH.exists():
+        return
+    with open(MATCHES_PATH, newline="") as f:
+        for row in csv.DictReader(f):
+            confidence = float(row["confidence"])
+            amount = float(row["ledger_amount"])
+            if confidence < 1.0 or abs(amount) >= action_ledger.APPROVAL_THRESHOLD:
+                action_ledger.record(
+                    "reconciliation_agent",
+                    "matched",
+                    f"{row['category']}: {row['ledger_id']}<->{row['settlement_id']} "
+                    f"(ref {row['txn_ref'] or '(none)'})",
+                    amount=amount,
+                    confidence=confidence,
+                )
 
 
 def _format_summary(summary):
