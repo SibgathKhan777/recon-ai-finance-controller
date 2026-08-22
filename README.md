@@ -88,8 +88,35 @@ The matching core stays deliberately **not** LLM-based — exact/fuzzy/
 tolerance matching is cheap, fast, and auditable. The LLM (optional,
 `ANTHROPIC_API_KEY`) is used only where judgment is genuinely needed:
 phrasing an exception explanation, or answering an open-ended question the
-Q&A agent's keyword rules don't cover. Which specialist handles a message
-is always decided by the deterministic router, with or without a key.
+Q&A agent's keyword rules don't cover.
+
+### Optional: LangGraph tool-calling router
+
+`agents/orchestrator.py::smart_handle` (used by both `agent_cli.py` and
+`app.py`) is the real entry point, not `handle` directly. Without an API
+key it's just `handle` under a different name — same deterministic
+regex router, same behavior, no change. With `ANTHROPIC_API_KEY` set (and
+the optional `langgraph` + `langchain` + `langchain-anthropic` packages,
+already in `requirements.txt`), it upgrades to
+`agents/langgraph_orchestrator.py`: the same five agents wrapped as
+LangChain tools, with an LLM (Claude Haiku, via `langchain.agents.
+create_agent`) deciding which one to call from the raw message instead of
+matching against a fixed regex list.
+
+This is what actually solves the deterministic router's real limitation —
+the "verify claim:" trigger phrase exists only because the rule-based
+router can't tell a claim from a question by phrasing alone. The
+LangGraph path can: it reads the `verify_claim` tool's description and
+routes a bare "I never received my payout for RZP..." there directly, no
+special syntax required. The trade-off is real and stated plainly: this
+path costs an API call per message and its tool choice isn't
+deterministic, which is exactly why it's opt-in rather than the default.
+
+Tested without ever calling the real Anthropic API: each tool is a plain
+function tested directly, and the full graph is tested against
+`langchain_core`'s `FakeMessagesListChatModel`, which scripts a tool call
+deterministically so the actual `create_agent`/tool-dispatch machinery
+gets exercised without a network call or a key.
 
 ## Quickstart
 
@@ -105,7 +132,9 @@ streamlit run app.py        # or: dashboard with a chat box for the same agents
 No API key required for any of the above. Set `ANTHROPIC_API_KEY` (see
 `.env.example`) to let the Reconciliation Agent's exception explanations
 and the Q&A agent's open-ended answers be phrased by Claude instead of
-templates.
+templates, and to upgrade both `agent_cli.py` and `app.py` to the
+LangGraph tool-calling router (see "Optional: LangGraph tool-calling
+router" above) instead of the deterministic one.
 
 Try in `agent_cli.py`:
 
@@ -128,7 +157,7 @@ Try in `agent_cli.py`:
 | `python cli.py run` | re-run the pipeline against already-generated data |
 | `python agent_cli.py` | interactive terminal chat across all five agents |
 | `streamlit run app.py` | dashboard: metrics, exception explorer, cash forecast chart, agent chat box, claim verification tab |
-| `python -m pytest` | 92 tests: unit tests across the matcher/scorer/agents, plus end-to-end user-journey tests that spawn the real CLI as subprocesses |
+| `python -m pytest` | 102 tests: unit tests across the matcher/scorer/agents, plus end-to-end user-journey tests that spawn the real CLI as subprocesses |
 
 ## Honest numbers, not a demo trick
 
@@ -320,8 +349,9 @@ agents/
   forecast_agent.py            cash forecast + at-risk amount
   exception_agent.py            exception triage / prioritization
   claim_verifier.py              checks a user's claim against the record
-  action_ledger.py                 shared, bounded, gated audit trail
-tests/                     92 pytest tests: unit-level across recon/ and agents/,
+  langgraph_orchestrator.py        optional LLM tool-calling router
+  action_ledger.py                   shared, bounded, gated audit trail
+tests/                     102 pytest tests: unit-level across recon/ and agents/,
                            plus test_user_journey.py -- real subprocess sessions
                            that act as a user typing into cli.py / agent_cli.py
 ```

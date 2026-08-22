@@ -8,6 +8,7 @@ template, but which specialist ran is decided by this deterministic router
 either way.
 """
 import csv
+import os
 import re
 from pathlib import Path
 
@@ -53,6 +54,25 @@ def handle(message):
         return f"[{result['verdict']}] {result['message']}"
 
     return qa_agent.answer(message)
+
+
+def smart_handle(message):
+    """Same contract as handle(): takes a message, returns a response
+    string. Uses the LangGraph tool-calling agent (agents.langgraph_
+    orchestrator) when ANTHROPIC_API_KEY is set and the optional langgraph
+    + langchain-anthropic packages are installed -- an LLM decides which
+    specialist tool to call, so it handles open-ended phrasing (including
+    a bare claim with no "verify claim:" trigger phrase) that the
+    deterministic router's fixed regexes can't. Falls back to handle()
+    whenever that path isn't available, so this never requires an API key
+    to work -- it only ever upgrades the experience, never gates it."""
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        try:
+            from agents.langgraph_orchestrator import handle as langgraph_handle
+            return langgraph_handle(message)
+        except ImportError:
+            pass
+    return handle(message)
 
 
 def _log_consequential_matches():

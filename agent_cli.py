@@ -17,7 +17,7 @@ Try:
   triage exceptions
   verify claim: I never received my payout for RZP123456789
 """
-from agents.orchestrator import handle
+from agents.orchestrator import smart_handle as handle
 
 BANNER = """
 AI Finance Controller -- multi-agent terminal

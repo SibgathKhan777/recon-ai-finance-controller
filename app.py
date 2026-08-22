@@ -10,7 +10,7 @@ import pandas as pd
 import streamlit as st
 
 from agents import claim_verifier, forecast_agent
-from agents.orchestrator import handle as agent_handle
+from agents.orchestrator import smart_handle as agent_handle
 
 REPORTS_DIR = Path(__file__).resolve().parent / "reports"
 

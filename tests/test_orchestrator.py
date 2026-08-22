@@ -1,5 +1,5 @@
 from agents import action_ledger
-from agents.orchestrator import handle
+from agents.orchestrator import handle, smart_handle
 
 
 def test_routes_run_reconciliation():
@@ -41,6 +41,30 @@ def test_plain_claim_text_without_trigger_phrase_falls_through_to_qa():
     # without the trigger phrase is NOT silently routed to claim_verifier
     result = handle("I never received my payout for RZP999999998")
     assert not result.startswith("[")
+
+
+def test_smart_handle_falls_back_to_deterministic_router_without_api_key(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    result = smart_handle("what's our match rate")
+    assert "Match rate" in result
+
+
+def test_smart_handle_falls_back_when_langgraph_orchestrator_is_unimportable(monkeypatch):
+    # even with a key present, a missing optional dependency must not break
+    # the app -- this is the whole point of the opt-in design
+    import builtins
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "agents.langgraph_orchestrator":
+            raise ImportError("simulated missing optional dependency")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    result = smart_handle("what's our match rate")
+    assert "Match rate" in result
 
 
 def test_running_reconciliation_logs_non_trivial_matches_to_the_audit_trail():
