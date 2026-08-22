@@ -136,6 +136,46 @@ def generate(seed: int = 42, n_base: int = 150, corrupt: str = "none"):
         settlement_rows.append(SettlementRow(dup_id, dup.txn_ref, dup.date, dup.amount, dup.merchant, "payout (duplicate batch retry)"))
         ground_truth.append(GroundTruthRow("", dup_id, "duplicate_settlement"))
 
+    # unreferenced transactions: a real data-quality scenario -- some payment
+    # channels (cash-equivalent UPI, manual bank transfers) never capture a
+    # structured reference number at all. Two unambiguous pairs demonstrate
+    # that the matcher still matches them, just at lower confidence -- this
+    # is what makes the audit trail's confidence gate demonstrable, not just
+    # unit-tested against a hand-built fixture.
+    for _ in range(2):
+        idx += 1
+        ledger_id = f"L{idx:05d}"
+        settlement_id = f"S{idx:05d}"
+        merchant = rng.choice(MERCHANTS)
+        amount = new_amount()
+        day_offset = rng.randrange(1, 30)
+        ledger_rows.append(LedgerRow(ledger_id, "", txn_date(day_offset), amount, merchant, "cash-equivalent payment, no reference captured"))
+        settlement_rows.append(SettlementRow(settlement_id, "", txn_date(day_offset), amount, merchant, "payout, no reference"))
+        ground_truth.append(GroundTruthRow(ledger_id, settlement_id, "matched_no_reference"))
+
+    # ...and one ambiguous cluster: two ledger rows and two settlement rows,
+    # all blank-ref, sharing the same amount and date. Amount+date alone
+    # can't tell them apart, so none should be auto-matched -- they should
+    # come out as ambiguous_no_reference, flagged for manual review.
+    amb_amount = new_amount()
+    amb_date = txn_date(rng.randrange(1, 30))
+    amb_merchant = rng.choice(MERCHANTS)
+    amb_ledger_ids, amb_settlement_ids = [], []
+    for _ in range(2):
+        idx += 1
+        ledger_id = f"L{idx:05d}"
+        ledger_rows.append(LedgerRow(ledger_id, "", amb_date, amb_amount, amb_merchant, "cash-equivalent payment, no reference captured"))
+        amb_ledger_ids.append(ledger_id)
+    for _ in range(2):
+        idx += 1
+        settlement_id = f"S{idx:05d}"
+        settlement_rows.append(SettlementRow(settlement_id, "", amb_date, amb_amount, amb_merchant, "payout, no reference"))
+        amb_settlement_ids.append(settlement_id)
+    for lid in amb_ledger_ids:
+        ground_truth.append(GroundTruthRow(lid, "", "ambiguous_no_reference"))
+    for sid in amb_settlement_ids:
+        ground_truth.append(GroundTruthRow("", sid, "ambiguous_no_reference"))
+
     if corrupt == "currency":
         drift = 1.035  # 3.5% drift — deliberately just past the matcher's 2% tolerance band
         affected = rng.sample(settlement_rows, k=max(1, len(settlement_rows) // 7))

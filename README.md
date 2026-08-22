@@ -113,25 +113,27 @@ Try in `agent_cli.py`:
 | `python cli.py run` | re-run the pipeline against already-generated data |
 | `python agent_cli.py` | interactive terminal chat across all four agents |
 | `streamlit run app.py` | dashboard: metrics, exception explorer, cash forecast chart, agent chat box |
-| `python -m pytest` | 78 tests: unit tests across the matcher/scorer/agents, plus end-to-end user-journey tests that spawn the real CLI as subprocesses |
+| `python -m pytest` | 79 tests: unit tests across the matcher/scorer/agents, plus end-to-end user-journey tests that spawn the real CLI as subprocesses |
 
 ## Honest numbers, not a demo trick
 
 `python cli.py demo` prints something like:
 
 ```
-Ledger rows:      141
-Settlement rows:  141
-Matched pairs:    134
-Exceptions:       14
-Match rate:       95.0%
+Ledger rows:      145
+Settlement rows:  145
+Matched pairs:    136
+Exceptions:       18
+Match rate:       93.8%
 Overall accuracy vs ground truth: 100.0%
 
 Per-category accuracy:
+  ambiguous_no_reference         4/4    (100.0%)
   corrupted_ref                  7/7    (100.0%)
   duplicate_settlement           3/3    (100.0%)
   exact                        100/100  (100.0%)
   fee_adjustment                15/15   (100.0%)
+  matched_no_reference           2/2    (100.0%)
   missing_in_ledger              4/4    (100.0%)
   missing_in_settlement          7/7    (100.0%)
   timing                        12/12   (100.0%)
@@ -207,14 +209,23 @@ explainable, bounded and gated" bar this track is judged on. Fixed:
 or amount above the approval threshold) to the ledger, and
 `action_ledger.record()` gates on confidence as well as amount — a large
 amount always needs a human regardless of match confidence, and a
-low-confidence match always needs one regardless of amount. Caveat, found
-while verifying this end to end rather than assumed: on the *default*
-demo dataset, every flagged entry today is amount-driven, not
+low-confidence match always needs one regardless of amount.
+
+Verifying this end to end (not just unit-testing it) surfaced a real gap:
+on the dataset as it stood, every flagged entry was amount-driven, not
 confidence-driven — synthetic corrupted-ref matches score ~0.92 similarity
-(a single-char typo out of 12 characters), comfortably above the 0.8 gate.
-The mechanism is correct and unit-tested against a constructed
-low-confidence match, but isn't visibly exercised by `python cli.py demo`
-as it stands.
+(a single-char typo out of 12 characters), comfortably above the 0.8 gate,
+so the mechanism was correct but never actually demonstrated by
+`python cli.py demo`. Fixed by adding an **unreferenced-transaction**
+scenario to the generator: two transactions with a blank reference number
+(a real data-quality issue — some payment channels never capture a
+structured reference at all) that the matcher still matches, correctly,
+but at `confidence: 0.5` — now a genuine confidence-driven approval flag
+shows up in `reports/action_ledger.jsonl` on every default demo run,
+alongside a small ambiguous cluster (two blank-ref ledger rows, two
+blank-ref settlement rows, same amount and date) that correctly comes out
+as `ambiguous_no_reference` instead of being guessed at. Ask the Q&A agent
+"show ambiguous exceptions" to see it, or check the ledger directly.
 
 ## Known limitations
 

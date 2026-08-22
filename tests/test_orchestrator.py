@@ -36,11 +36,26 @@ def test_running_reconciliation_logs_non_trivial_matches_to_the_audit_trail():
     assert reconciliation_entries, "expected at least one match logged (fee/timing/fuzzy matches are never confidence 1.0)"
 
 
+def test_default_demo_dataset_produces_a_genuine_confidence_driven_flag():
+    # regression guard for a real gap: the confidence-gating mechanism was
+    # originally built and unit-tested, but the default demo dataset never
+    # actually exercised it -- every match happened to score >= 0.8
+    # confidence, so every audit-trail flag was amount-driven, not
+    # confidence-driven. Fixed by adding an unreferenced-transaction
+    # scenario (matched_no_reference, confidence 0.5) to the generator.
+    # This test would fail again if that scenario were ever removed.
+    handle("run reconciliation")
+    entries = [e for e in action_ledger.read_all() if e["agent"] == "reconciliation_agent"]
+    confidence_driven = [
+        e for e in entries
+        if e["confidence"] is not None and e["confidence"] < 0.8
+        and e["needs_human_approval"]
+    ]
+    assert confidence_driven, "expected the demo dataset's unreferenced-transaction scenario to produce at least one confidence-driven approval flag"
+
+
 def test_low_confidence_matches_get_flagged_when_logged(tmp_path, monkeypatch):
-    # the default demo dataset's fuzzy matches happen to score high
-    # confidence (a single-char typo out of 12 chars is a ~0.92 ratio,
-    # well above the 0.8 gate) -- so exercise the wiring directly with a
-    # constructed low-confidence row instead of relying on incidental data
+    # unit-level check of the wiring itself, independent of dataset content
     import csv
 
     from agents import orchestrator

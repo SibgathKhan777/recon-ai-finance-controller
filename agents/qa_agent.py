@@ -50,6 +50,8 @@ def answer(message):
         return _list_category(exceptions, "duplicate_settlement", "duplicate settlement")
     if "drift" in lower or "systematic" in lower:
         return _list_category(exceptions, "systematic_drift_suspected", "systematic drift")
+    if "ambiguous" in lower or "no reference" in lower or "unreferenced" in lower:
+        return _list_category(exceptions, "ambiguous_no_reference", "ambiguous no-reference")
     if "match rate" in lower or "accuracy" in lower:
         return (
             f"Match rate: {summary['match_rate'] * 100:.1f}% "
@@ -100,7 +102,9 @@ def _list_category(exceptions, category, label):
         return f"No {label} exceptions in the current report."
     lines = [f"{len(rows)} {label} exception(s):"]
     for r in rows[:10]:
-        lines.append(f"  {r['txn_ref']} -- Rs.{float(r['amount']):,.2f} on {r['date']}")
+        row_id = r.get("ledger_id") or r.get("settlement_id") or "?"
+        ref_display = r["txn_ref"] or "(no reference)"
+        lines.append(f"  [{row_id}] {ref_display} -- Rs.{float(r['amount']):,.2f} on {r['date']}")
     return "\n".join(lines)
 
 
