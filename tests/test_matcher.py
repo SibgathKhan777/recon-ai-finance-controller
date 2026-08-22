@@ -5,8 +5,11 @@ def _ledger(id_, ref, date, amount):
     return {"ledger_id": id_, "txn_ref": ref, "date": date, "amount": amount, "merchant": "X", "description": "d"}
 
 
-def _settlement(id_, ref, date, amount):
-    return {"settlement_id": id_, "txn_ref": ref, "date": date, "amount": amount, "merchant": "X", "description": "d"}
+def _settlement(id_, ref, date, amount, fee=0.0, tax=0.0, utr=""):
+    return {
+        "settlement_id": id_, "txn_ref": ref, "date": date, "amount": amount,
+        "fee": fee, "tax": tax, "utr": utr, "merchant": "X", "description": "d",
+    }
 
 
 def test_exact_match():
@@ -18,12 +21,31 @@ def test_exact_match():
     assert not exceptions
 
 
-def test_fee_adjustment_within_tolerance():
+def test_fee_adjustment_matches_via_exact_gross_arithmetic():
+    # 1000 = 990 (net) + 8 (fee) + 2 (tax) -- an exact bookkeeping identity,
+    # not a percentage guess, so this earns full confidence
     ledger = [_ledger("L1", "RZP1", "2026-01-01", 1000.0)]
-    settlement = [_settlement("S1", "RZP1", "2026-01-01", 995.0)]
+    settlement = [_settlement("S1", "RZP1", "2026-01-01", 990.0, fee=8.0, tax=2.0, utr="AXISCN1234567890")]
     matches, exceptions = matcher.match(ledger, settlement)
     assert len(matches) == 1
     assert matches[0]["category"] == "fee_adjustment"
+    assert matches[0]["confidence"] == 1.0
+    assert matches[0]["fee"] == 8.0
+    assert matches[0]["tax"] == 2.0
+    assert matches[0]["utr"] == "AXISCN1234567890"
+
+
+def test_amount_difference_without_a_stated_fee_does_not_match_as_fee_adjustment():
+    # documents an intentional boundary: pass 2 now requires an EXPLICIT
+    # fee/tax breakdown that reconciles exactly -- an unexplained amount gap
+    # (no fee/tax recorded) is not assumed to be a fee. With the same ref,
+    # this still gets picked up by the fuzzy pass (ref similarity 1.0), just
+    # not labeled "fee_adjustment" -- there's nothing to verify it against.
+    ledger = [_ledger("L1", "RZP1", "2026-01-01", 1000.0)]
+    settlement = [_settlement("S1", "RZP1", "2026-01-01", 995.0)]  # no fee/tax stated
+    matches, exceptions = matcher.match(ledger, settlement)
+    assert len(matches) == 1
+    assert matches[0]["category"] != "fee_adjustment"
 
 
 def test_timing_mismatch_within_window():

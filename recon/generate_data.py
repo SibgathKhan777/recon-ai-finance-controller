@@ -18,6 +18,15 @@ MERCHANTS = ["Kirana Mart", "Bluewave Retail", "Solstice Foods", "Nimbus Apparel
 
 REF_ALPHABET = "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 
+# Matches Razorpay's real settlement.entity fields (id, amount, fees, tax,
+# utr) rather than an invented generic schema -- see settlement_id/fee/tax/
+# utr on SettlementRow below. https://razorpay.com/docs/api/settlements/entity/
+BANK_CODES = ["AXIS", "HDFC", "ICIC", "SBIN", "KKBK"]
+
+
+def _generate_utr(rng: random.Random) -> str:
+    return f"{rng.choice(BANK_CODES)}CN{rng.randrange(10**9, 10**10)}"
+
 
 @dataclass
 class LedgerRow:
@@ -37,6 +46,9 @@ class SettlementRow:
     amount: float
     merchant: str
     description: str
+    fee: float = 0.0
+    tax: float = 0.0
+    utr: str = ""
 
 
 @dataclass
@@ -95,30 +107,37 @@ def generate(seed: int = 42, n_base: int = 150, corrupt: str = "none"):
 
             if category == "exact":
                 ledger_rows.append(LedgerRow(ledger_id, txn_ref, txn_date(base_day_offset), base_amount, merchant, "order settlement"))
-                srow = SettlementRow(settlement_id, txn_ref, txn_date(base_day_offset), base_amount, merchant, "payout")
+                srow = SettlementRow(settlement_id, txn_ref, txn_date(base_day_offset), base_amount, merchant, "payout", utr=_generate_utr(rng))
                 settlement_rows.append(srow)
                 exact_settlement_rows.append(srow)
                 ground_truth.append(GroundTruthRow(ledger_id, settlement_id, "exact"))
 
             elif category == "fee_adjustment":
-                # Percentage-based, like a real gateway fee, and deliberately kept
-                # under the matcher's 2% tolerance band so this stays a genuine
-                # in-tolerance case rather than an unmatchable outlier.
+                # fee and tax are explicit, separate fields -- matching Razorpay's
+                # real settlement schema -- rather than baked silently into the
+                # net amount. That's what lets the matcher verify this exactly
+                # (ledger == settlement + fee + tax) instead of guessing via a
+                # percentage tolerance.
                 fee = round(base_amount * rng.uniform(0.003, 0.018), 2)
+                tax = round(fee * 0.18, 2)  # GST on the gateway fee
+                net_amount = round(base_amount - fee - tax, 2)
                 ledger_rows.append(LedgerRow(ledger_id, txn_ref, txn_date(base_day_offset), base_amount, merchant, "order settlement"))
-                settlement_rows.append(SettlementRow(settlement_id, txn_ref, txn_date(base_day_offset), round(base_amount - fee, 2), merchant, "payout net of gateway fee"))
+                settlement_rows.append(SettlementRow(
+                    settlement_id, txn_ref, txn_date(base_day_offset), net_amount, merchant,
+                    "payout net of gateway fee", fee=fee, tax=tax, utr=_generate_utr(rng),
+                ))
                 ground_truth.append(GroundTruthRow(ledger_id, settlement_id, "fee_adjustment"))
 
             elif category == "timing":
                 lag = rng.randrange(1, 4)
                 ledger_rows.append(LedgerRow(ledger_id, txn_ref, txn_date(base_day_offset), base_amount, merchant, "order settlement"))
-                settlement_rows.append(SettlementRow(settlement_id, txn_ref, txn_date(base_day_offset - lag), base_amount, merchant, "payout"))
+                settlement_rows.append(SettlementRow(settlement_id, txn_ref, txn_date(base_day_offset - lag), base_amount, merchant, "payout", utr=_generate_utr(rng)))
                 ground_truth.append(GroundTruthRow(ledger_id, settlement_id, "timing"))
 
             elif category == "corrupted_ref":
                 bad_ref = _corrupt_ref(txn_ref, rng)
                 ledger_rows.append(LedgerRow(ledger_id, txn_ref, txn_date(base_day_offset), base_amount, merchant, "order settlement"))
-                settlement_rows.append(SettlementRow(settlement_id, bad_ref, txn_date(base_day_offset), base_amount, merchant, "payout"))
+                settlement_rows.append(SettlementRow(settlement_id, bad_ref, txn_date(base_day_offset), base_amount, merchant, "payout", utr=_generate_utr(rng)))
                 ground_truth.append(GroundTruthRow(ledger_id, settlement_id, "corrupted_ref"))
 
             elif category == "missing_in_settlement":
@@ -126,14 +145,17 @@ def generate(seed: int = 42, n_base: int = 150, corrupt: str = "none"):
                 ground_truth.append(GroundTruthRow(ledger_id, "", "missing_in_settlement"))
 
             elif category == "missing_in_ledger":
-                settlement_rows.append(SettlementRow(settlement_id, txn_ref, txn_date(base_day_offset), base_amount, merchant, "payout, unbooked"))
+                settlement_rows.append(SettlementRow(settlement_id, txn_ref, txn_date(base_day_offset), base_amount, merchant, "payout, unbooked", utr=_generate_utr(rng)))
                 ground_truth.append(GroundTruthRow("", settlement_id, "missing_in_ledger"))
 
     # duplicate settlements: clone a few already-exact-matched settlement rows
     for dup in rng.sample(exact_settlement_rows, k=min(3, len(exact_settlement_rows))):
         idx += 1
         dup_id = f"S{idx:05d}"
-        settlement_rows.append(SettlementRow(dup_id, dup.txn_ref, dup.date, dup.amount, dup.merchant, "payout (duplicate batch retry)"))
+        settlement_rows.append(SettlementRow(
+            dup_id, dup.txn_ref, dup.date, dup.amount, dup.merchant,
+            "payout (duplicate batch retry)", utr=_generate_utr(rng),
+        ))
         ground_truth.append(GroundTruthRow("", dup_id, "duplicate_settlement"))
 
     # unreferenced transactions: a real data-quality scenario -- some payment
@@ -150,7 +172,7 @@ def generate(seed: int = 42, n_base: int = 150, corrupt: str = "none"):
         amount = new_amount()
         day_offset = rng.randrange(1, 30)
         ledger_rows.append(LedgerRow(ledger_id, "", txn_date(day_offset), amount, merchant, "cash-equivalent payment, no reference captured"))
-        settlement_rows.append(SettlementRow(settlement_id, "", txn_date(day_offset), amount, merchant, "payout, no reference"))
+        settlement_rows.append(SettlementRow(settlement_id, "", txn_date(day_offset), amount, merchant, "payout, no reference", utr=_generate_utr(rng)))
         ground_truth.append(GroundTruthRow(ledger_id, settlement_id, "matched_no_reference"))
 
     # ...and one ambiguous cluster: two ledger rows and two settlement rows,
@@ -169,7 +191,7 @@ def generate(seed: int = 42, n_base: int = 150, corrupt: str = "none"):
     for _ in range(2):
         idx += 1
         settlement_id = f"S{idx:05d}"
-        settlement_rows.append(SettlementRow(settlement_id, "", amb_date, amb_amount, amb_merchant, "payout, no reference"))
+        settlement_rows.append(SettlementRow(settlement_id, "", amb_date, amb_amount, amb_merchant, "payout, no reference", utr=_generate_utr(rng)))
         amb_settlement_ids.append(settlement_id)
     for lid in amb_ledger_ids:
         ground_truth.append(GroundTruthRow(lid, "", "ambiguous_no_reference"))

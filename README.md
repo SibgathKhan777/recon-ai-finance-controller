@@ -113,7 +113,7 @@ Try in `agent_cli.py`:
 | `python cli.py run` | re-run the pipeline against already-generated data |
 | `python agent_cli.py` | interactive terminal chat across all four agents |
 | `streamlit run app.py` | dashboard: metrics, exception explorer, cash forecast chart, agent chat box |
-| `python -m pytest` | 79 tests: unit tests across the matcher/scorer/agents, plus end-to-end user-journey tests that spawn the real CLI as subprocesses |
+| `python -m pytest` | 80 tests: unit tests across the matcher/scorer/agents, plus end-to-end user-journey tests that spawn the real CLI as subprocesses |
 
 ## Honest numbers, not a demo trick
 
@@ -227,6 +227,37 @@ blank-ref settlement rows, same amount and date) that correctly comes out
 as `ambiguous_no_reference` instead of being guessed at. Ask the Q&A agent
 "show ambiguous exceptions" to see it, or check the ledger directly.
 
+**5. Our schema didn't match Razorpay's real one, and fee-matching was
+guessing when it didn't need to.** Research into Razorpay's actual
+`settlement.processed` webhook payload showed real settlement records carry
+separate `fees` and `tax` fields (plus a `utr` for bank-side reconciliation)
+— our synthetic data baked the fee silently into a single net `amount`
+instead. That meant "fee_adjustment" matches were only ever a **percentage
+tolerance guess** (0.9 confidence), even though the actual fee amount was
+knowable. Fixed: settlement rows now carry explicit `fee`, `tax`, and `utr`
+fields, and the matcher verifies the exact bookkeeping identity
+`ledger_amount == settlement_amount + fee + tax` instead of guessing within
+a tolerance band — a genuine identity check earns `confidence: 1.0`, not a
+heuristic 0.9. The UTR also now flows into exception explanations ("check
+your bank statement for that UTR") and Q&A answers, which is what a real
+finance analyst would actually need to act on an exception.
+
+One deliberate deviation from a fully faithful Razorpay schema: real
+settlement amounts are integers in paise (smallest currency unit); this
+project keeps rupee floats throughout. Converting the unit representation
+touches nine source files and every test's expected values for a purely
+cosmetic match, with no behavioral upside — the actual float-precision risk
+that unit choice guards against was already checked directly (see the
+"Known limitations" note below) and isn't live here. The fee/tax/UTR
+separation was the part with real teeth, so that's what changed.
+
+Also caught mid-fix: normalizing a settlement row's `fee`/`tax` from a
+freshly-generated Python object works fine, but a row read back from
+`settlement.csv` via `csv.DictReader` has every field as a **string** —
+`"8.0" + 0.0` throws `TypeError`, not a silent bug, so this one surfaced
+immediately on the first full-pipeline test run rather than needing to be
+hunted for.
+
 ## Known limitations
 
 - The orchestrator's routing is keyword-based, not intent-classified by an
@@ -243,6 +274,18 @@ as `ambiguous_no_reference` instead of being guessed at. Ask the Q&A agent
   a black-box estimate.
 - Synthetic data only — no real Razorpay API calls are made (matches the
   track's test-mode / synthetic-data framing).
+- Amounts are rupee floats, not integer paise like Razorpay's real API —
+  a float's precision is nowhere near this system's actual comparison
+  tolerances (checked directly, not assumed), so this is a representation
+  choice, not a live correctness bug.
+- No authentication or role-based access control on the dashboard — anyone
+  who can reach it sees and can trigger everything. Real reconciliation
+  software (SOX-relevant) requires this; out of scope for a demo.
+- Single currency only — no FX handling for multi-currency merchants.
+- Batch-only: reconciliation runs on a static CSV snapshot, not a live
+  webhook feed. The `utr` field is modeled specifically so this could
+  extend to true 3-way reconciliation (ledger ↔ settlement ↔ bank
+  statement) — that third leg isn't built.
 
 ## Project layout
 

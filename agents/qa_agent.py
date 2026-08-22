@@ -78,9 +78,14 @@ def answer(message):
 def _answer_about_ref(ref, matches, exceptions):
     for m in matches:
         if m["txn_ref"] == ref:
+            utr_note = f", UTR {m['utr']}" if m.get("utr") else ""
+            fee_note = ""
+            if m["category"] == "fee_adjustment":
+                fee_note = f" (fee Rs.{float(m['fee']):,.2f} + tax Rs.{float(m['tax']):,.2f})"
             return (
                 f"{ref} matched as '{m['category']}' -- ledger Rs.{float(m['ledger_amount']):,.2f} "
-                f"vs settlement Rs.{float(m['settlement_amount']):,.2f} (confidence {m['confidence']})."
+                f"vs settlement Rs.{float(m['settlement_amount']):,.2f}{fee_note}{utr_note} "
+                f"(confidence {m['confidence']})."
             )
     for e in exceptions:
         if e["txn_ref"] == ref:
@@ -92,8 +97,12 @@ def _answer_fees(matches):
     fee_rows = [m for m in matches if m["category"] == "fee_adjustment"]
     if not fee_rows:
         return "No fee-adjustment matches in the current report."
-    total_fees = sum(float(m["ledger_amount"]) - float(m["settlement_amount"]) for m in fee_rows)
-    return f"Total gateway fees across {len(fee_rows)} settlements: Rs.{total_fees:,.2f}."
+    total_fees = sum(float(m["fee"]) for m in fee_rows)
+    total_tax = sum(float(m["tax"]) for m in fee_rows)
+    return (
+        f"Total gateway fees across {len(fee_rows)} settlements: Rs.{total_fees:,.2f} "
+        f"(plus Rs.{total_tax:,.2f} tax on those fees)."
+    )
 
 
 def _list_category(exceptions, category, label):

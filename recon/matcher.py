@@ -2,7 +2,10 @@
 
 Four passes, cheapest and most trustworthy first:
   1. exact reference + exact amount
-  2. exact reference + amount within tolerance (fees, rounding)
+  2. exact reference + exact gross arithmetic (ledger == settlement + fee +
+     tax) -- fee and tax are explicit fields on the settlement record (as
+     in Razorpay's real settlement.entity), so this is bookkeeping
+     verification, not a percentage guess
   3. fuzzy reference + amount tolerance + date window (timing drift, typo'd refs)
   4. no reference at all -- amount+date is weak evidence, so this only
      matches when exactly one candidate exists on each side; anything
@@ -30,6 +33,15 @@ def _within_tolerance(a, b):
     return abs(a - b) <= max(AMOUNT_TOLERANCE_FLOOR, a * AMOUNT_TOLERANCE_PCT)
 
 
+def _gross_matches(ledger_amount, settlement_row):
+    """True if the ledger amount reconciles exactly against the settlement
+    row's net amount plus its stated fee and tax -- verified bookkeeping,
+    not a tolerance guess. Rows without fee/tax fields (e.g. hand-built
+    test fixtures) default to 0, reducing this to a plain exact-amount check."""
+    expected_gross = settlement_row["amount"] + settlement_row.get("fee", 0.0) + settlement_row.get("tax", 0.0)
+    return abs(ledger_amount - expected_gross) < 0.01
+
+
 def _date_diff_days(d1, d2):
     return abs((datetime.fromisoformat(d1) - datetime.fromisoformat(d2)).days)
 
@@ -43,8 +55,16 @@ def _has_ref(row):
 
 
 def match(ledger_rows, settlement_rows):
+    # fee/tax may arrive as CSV strings (e.g. from a real DictReader row) --
+    # normalize here so downstream arithmetic never mixes float and str.
     ledger = [dict(r, amount=float(r["amount"]), matched=False) for r in ledger_rows]
-    settlement = [dict(r, amount=float(r["amount"]), matched=False) for r in settlement_rows]
+    settlement = [
+        dict(
+            r, amount=float(r["amount"]), matched=False,
+            fee=float(r.get("fee") or 0.0), tax=float(r.get("tax") or 0.0),
+        )
+        for r in settlement_rows
+    ]
 
     matches = []
 
@@ -72,7 +92,10 @@ def match(ledger_rows, settlement_rows):
                 srow["matched"] = True
                 break
 
-    # Pass 2: exact ref, amount within tolerance (fees, rounding), same day
+    # Pass 2: exact ref, exact gross arithmetic (ledger == settlement + fee +
+    # tax), same day. This is a verified identity, not a guess, so it earns
+    # full confidence -- unlike a percentage tolerance, it can't be fooled by
+    # a coincidentally-close amount that isn't actually a fee deduction.
     for lrow in unmatched(ledger):
         if not _has_ref(lrow):
             continue
@@ -80,10 +103,10 @@ def match(ledger_rows, settlement_rows):
             if (
                 _has_ref(srow)
                 and srow["txn_ref"] == lrow["txn_ref"]
-                and _within_tolerance(lrow["amount"], srow["amount"])
+                and _gross_matches(lrow["amount"], srow)
                 and _date_diff_days(lrow["date"], srow["date"]) == 0
             ):
-                _record(matches, lrow, srow, "fee_adjustment", 0.9)
+                _record(matches, lrow, srow, "fee_adjustment", 1.0)
                 lrow["matched"] = True
                 srow["matched"] = True
                 break
@@ -150,6 +173,9 @@ def _record(matches, lrow, srow, category, confidence):
         "txn_ref": lrow["txn_ref"],
         "ledger_amount": lrow["amount"],
         "settlement_amount": srow["amount"],
+        "fee": srow.get("fee", 0.0),
+        "tax": srow.get("tax", 0.0),
+        "utr": srow.get("utr", ""),
         "category": category,
         "confidence": confidence,
     })
@@ -164,6 +190,9 @@ def _exception_row(row, side, category):
         "date": row["date"],
         "category": category,
         "side": side,
+        "utr": row.get("utr", ""),
+        "fee": row.get("fee", 0.0),
+        "tax": row.get("tax", 0.0),
     }
 
 

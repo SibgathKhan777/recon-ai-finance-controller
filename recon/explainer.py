@@ -12,13 +12,14 @@ TEMPLATES = {
         "failed after authorization and was never actually settled."
     ),
     "missing_in_ledger": (
-        "Settlement includes a payout {ref} for Rs.{amount:,.2f} on {date} with no ledger "
-        "entry - check for a booking that was missed, or a refund/adjustment credited "
-        "directly by the gateway without a corresponding ledger write."
+        "Settlement includes a payout {ref} for Rs.{amount:,.2f} on {date} (UTR {utr}) with "
+        "no ledger entry - check your bank statement for that UTR to confirm receipt, or "
+        "look for a booking that was missed, or a refund/adjustment credited directly by "
+        "the gateway without a corresponding ledger write."
     ),
     "duplicate_settlement": (
-        "{ref} appears more than once in unmatched settlement rows - likely a duplicate "
-        "payout or a retried settlement batch. Only one instance should reconcile "
+        "{ref} appears more than once in unmatched settlement rows (UTR {utr}) - likely a "
+        "duplicate payout or a retried settlement batch. Only one instance should reconcile "
         "against the ledger; the rest need a payout-side correction, not a ledger entry."
     ),
     "systematic_drift_suspected": (
@@ -50,6 +51,7 @@ def _explain_with_template(row, window):
             window=window,
             drift_pct=(row.get("drift_ratio", 1.0) - 1) * 100,
             category=row.get("category", "unknown"),
+            utr=row.get("utr") or "unknown",
         )
     except Exception:
         return DEFAULT_TEMPLATE.format(
