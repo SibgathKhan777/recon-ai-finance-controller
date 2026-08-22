@@ -38,7 +38,7 @@ cat_df = pd.DataFrame([
     for cat, v in per_cat.items()
 ])
 st.bar_chart(cat_df.set_index("category")["accuracy"])
-st.dataframe(cat_df, use_container_width=True)
+st.dataframe(cat_df, width="stretch")
 
 st.subheader("Exceptions")
 exceptions_path = REPORTS_DIR / "exceptions.csv"
@@ -48,14 +48,14 @@ if exceptions_path.exists() and exceptions_path.stat().st_size > 0:
     choice = st.selectbox("Filter by category", categories)
     if choice != "All":
         exc_df = exc_df[exc_df["category"] == choice]
-    st.dataframe(exc_df, use_container_width=True)
+    st.dataframe(exc_df, width="stretch")
 else:
     st.info("No exceptions in this run.")
 
 st.subheader("Matched pairs")
 matches_path = REPORTS_DIR / "matches.csv"
 if matches_path.exists() and matches_path.stat().st_size > 0:
-    st.dataframe(pd.read_csv(matches_path), use_container_width=True)
+    st.dataframe(pd.read_csv(matches_path), width="stretch")
 
 with st.expander("Misclassified rows (matcher disagreed with ground truth)"):
     misses = summary.get("misclassified", [])
