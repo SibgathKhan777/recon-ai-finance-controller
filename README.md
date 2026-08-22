@@ -1,52 +1,79 @@
-# Recon — an AI Finance Controller agent
+# Ledger — a multi-agent AI Finance Controller
 
-Reconciles a ledger against a settlement file, explains every exception in
-plain English, and — unlike most reconciliation demos — scores its own
-output against known ground truth, so the accuracy numbers are real, not
-vibes.
+An orchestrator agent that routes finance-ops questions to specialist
+agents — Reconciliation, Settlement Q&A, Cash Forecaster, and Exception &
+Anomaly — each grounded in real, scored data. No agent invents a number;
+every figure in every answer traces back to an actual row.
 
 Built for the **Razorpay AI Buildathon — Track 04: AI Finance Controller**.
 
+## Why this shape
+
+Razorpay's own **Agent Studio** (launched March 2026, built on Anthropic's
+Claude Agent SDK) already ships a natural-language interface where a
+merchant can upload a bank statement and ask the system to match it
+against Razorpay settlements — work that used to take hours of manual
+reconciliation. This project is built in that same architectural language
+on purpose: an orchestrator fielding plain-English requests, routing to
+specialist agents, with every consequential action logged to a shared,
+bounded audit trail — not a single script that does one thing.
+
 ## What it solves
 
-Every payments business runs a version of this loop: the ledger says one
-thing, the settlement file from the bank/gateway says another, and someone
-has to figure out why — fees, timing, typos, duplicates, or a genuinely
-missing transaction — before the books close. This agent automates the
-first pass: match what can be matched with confidence, explain what can't,
-and flag when a pile of "exceptions" is actually one systemic problem.
+Every payments business runs a version of the same loop: the ledger says
+one thing, the settlement file says another, cash needs to be forecast
+under uncertainty, and someone has to answer "why didn't this settle" on
+demand. Four agents split that work:
+
+- **Reconciliation Agent** — matches ledger against settlement across
+  three passes (exact → tolerance → fuzzy), and catches *systemic* drift
+  (a currency/fee-schedule change) as one root cause instead of dozens of
+  one-off exceptions.
+- **Settlement Q&A Agent** — answers "why didn't RZP... settle", fee
+  totals, duplicate lists, drift status, and match-rate questions in plain
+  English, grounded only in the actual reconciliation output.
+- **Cash Forecaster Agent** — projects a short-term cash position from
+  realized settlements, and separately calls out money still at risk in
+  pending exceptions rather than pretending it already landed.
+- **Exception & Anomaly Agent** — proactively triages the exception list:
+  which rows are one-offs to clear, and which are one systemic issue
+  wearing thirty different transaction IDs.
 
 ## Architecture
 
 ```
-generate_data.py  ->  ledger.csv + settlement.csv + ground_truth.csv
-                              |
-                              v
-matcher.py   - deterministic core, 3 passes (exact -> tolerance -> fuzzy),
-               plus a post-pass that looks for a *systematic* amount drift
-               across otherwise-unmatched pairs (see "What broke" below)
-                              |
-                              v
-explainer.py - turns each exception into a plain-English explanation.
-               Uses Claude if ANTHROPIC_API_KEY is set, otherwise a
-               template fallback - the pipeline always runs end to end.
-                              |
-                              v
-scorer.py    - compares predictions to ground_truth.csv: overall accuracy,
-               per-category accuracy, and every misclassified row, so the
-               "measured accuracy" claim is checkable, not asserted.
-                              |
-                              v
-              reports/summary.json, scorecard.json, matches.csv, exceptions.csv
-                              |
-                              v
-              app.py - Streamlit dashboard over the above
+                    ┌──────────────────────────┐
+   "why didn't      │     Orchestrator          │  agents/orchestrator.py
+   RZP... settle?"   │  rule-based intent router │  no API key needed to route —
+   "cash forecast    │  (agent_cli.py / app.py)  │  always inspectable, never a
+   for 14 days"      └────────────┬─────────────┘  black box
+                                   │
+        ┌──────────────┬──────────┼──────────────┬───────────────┐
+        ▼              ▼          ▼              ▼               │
+  Reconciliation   Settlement  Cash          Exception &          │
+  Agent            Q&A Agent  Forecaster     Anomaly Agent        │
+  (recon/*)        (agents/   (agents/       (agents/             │
+                    qa_agent)  forecast_     exception_agent)     │
+                               agent)                             │
+        │              │          │              │                │
+        └──────────────┴──────────┴──────────────┴────────────────┘
+                                   ▼
+                    Shared Action Ledger (agents/action_ledger.py)
+                    every action logged, amounts >= Rs.5,000 flagged
+                    needs_human_approval — explainable, bounded, gated
 ```
 
-The matching core is deliberately **not** LLM-based — exact/fuzzy/tolerance
-matching is cheap, fast, and auditable. The LLM is used only where judgment
-is genuinely needed: writing a human-readable explanation for a row a human
-still has to review.
+The Reconciliation Agent's own output (`reports/exceptions.csv`,
+`summary.json`) is the shared substrate the other three agents read from —
+the Cash Forecaster's "at risk" figure and drift warning come directly
+from the Reconciliation Agent's exception list, not a separate estimate.
+
+The matching core stays deliberately **not** LLM-based — exact/fuzzy/
+tolerance matching is cheap, fast, and auditable. The LLM (optional,
+`ANTHROPIC_API_KEY`) is used only where judgment is genuinely needed:
+phrasing an exception explanation, or answering an open-ended question the
+Q&A agent's keyword rules don't cover. Which specialist handles a message
+is always decided by the deterministic router, with or without a key.
 
 ## Quickstart
 
@@ -54,107 +81,149 @@ still has to review.
 python -m venv .venv && source .venv/bin/activate    # optional
 pip install -r requirements.txt
 
-python cli.py demo          # generates ~285 synthetic rows and runs the full pipeline
-streamlit run app.py        # open the dashboard
+python cli.py demo          # generate synthetic data, run the reconciliation pipeline
+python agent_cli.py         # talk to the multi-agent system in your terminal
+streamlit run app.py        # or: dashboard with a chat box for the same agents
 ```
 
-No API key required to run it end to end. Set `ANTHROPIC_API_KEY` (see
-`.env.example`) to switch exception explanations from templates to live
-Claude output.
+No API key required for any of the above. Set `ANTHROPIC_API_KEY` (see
+`.env.example`) to let the Reconciliation Agent's exception explanations
+and the Q&A agent's open-ended answers be phrased by Claude instead of
+templates.
+
+Try in `agent_cli.py`:
+
+```
+> run reconciliation
+> what's our match rate
+> why didn't RZP123456789 settle        (use a real ref from reports/matches.csv)
+> cash forecast for 14 days
+> show duplicate exceptions
+> triage exceptions
+```
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `python cli.py demo` | generate data + run pipeline + print summary (one shot) |
+| `python cli.py demo` | generate data + run the reconciliation pipeline + print summary |
 | `python cli.py generate --corrupt currency` | regenerate data with an injected batch-level anomaly |
 | `python cli.py run` | re-run the pipeline against already-generated data |
-| `streamlit run app.py` | dashboard: match rate, per-category accuracy, exception explorer |
-| `python -m pytest` | unit tests for the matcher and scorer |
+| `python agent_cli.py` | interactive terminal chat across all four agents |
+| `streamlit run app.py` | dashboard: metrics, exception explorer, cash forecast chart, agent chat box |
+| `python -m pytest` | 30 unit tests across the matcher, scorer, and all four agents |
 
 ## Honest numbers, not a demo trick
 
 `python cli.py demo` prints something like:
 
 ```
-Ledger rows:      143
-Settlement rows:  142
-Matched pairs:    127
-Exceptions:       16
-Match rate:       88.8%
-Overall accuracy vs ground truth: 96.5%
+Ledger rows:      141
+Settlement rows:  141
+Matched pairs:    134
+Exceptions:       14
+Match rate:       95.0%
+Overall accuracy vs ground truth: 100.0%
 
 Per-category accuracy:
-  exact                         100/100  (100.0%)
-  fee_adjustment                  15/15  (100.0%)
-  timing                          12/12  (100.0%)
-  corrupted_ref                     7/8  ( 87.5%)
-  missing_in_settlement             8/8  (100.0%)
-  missing_in_ledger                 4/4  (100.0%)
-  duplicate_settlement              3/3  (100.0%)
+  corrupted_ref                  7/7    (100.0%)
+  duplicate_settlement           3/3    (100.0%)
+  exact                        100/100  (100.0%)
+  fee_adjustment                15/15   (100.0%)
+  missing_in_ledger              4/4    (100.0%)
+  missing_in_settlement          7/7    (100.0%)
+  timing                        12/12   (100.0%)
 ```
 
-Every row in `ground_truth.csv` has a known correct label that the matcher
+Every row in `ground_truth.csv` has a known correct label the matcher
 never sees — the scorecard is a real evaluation, including where it's
-wrong (`reports/scorecard.json -> misclassified`).
+wrong (`reports/scorecard.json -> misclassified`). Verified clean across
+30 random seeds, not cherry-picked.
+
+The Q&A and Cash Forecaster agents inherit this honesty by construction:
+they only ever read `reports/*` — they cannot answer with a number that
+didn't come from a scored pipeline run.
 
 ## What broke, and how I caught it
 
-Run:
+Two real bugs, found by testing rather than assumed away.
+
+**1. A currency-drift batch, and the fix that catches it.** Run:
 
 ```bash
 python cli.py demo --corrupt currency
 ```
 
-This injects a **3.5% systematic amount drift** into ~15% of settlement
-rows — simulating a currency-conversion or fee-schedule change upstream.
-3.5% is deliberately just past the matcher's 2% fee-tolerance band, so
-pass 2 (tolerance matching) silently misses every affected row, and each
-one falls through to exceptions individually — a pile of unrelated-looking
-"missing" rows instead of one root cause.
+This injects a 3.5% systematic amount drift into ~15% of settlement rows
+— simulating a currency-conversion or fee-schedule change upstream. 3.5%
+is deliberately just past the matcher's 2% fee-tolerance band, so the
+tolerance pass silently misses every affected row, and each one falls
+through to exceptions individually — dozens of unrelated-looking "missing"
+rows instead of one root cause. The fix (`matcher._flag_batch_drift`)
+looks at unmatched pairs that still share an exact reference and checks
+whether their amount ratios cluster tightly around a common value; if
+three or more do, it re-labels them `systematic_drift_suspected` with the
+detected ratio instead of leaving them as N generic exceptions. The Cash
+Forecaster then surfaces that same drift note automatically, because it
+reads the Reconciliation Agent's own exception list rather than
+maintaining a separate view of the data.
 
-**The fix**: a post-pass (`matcher._flag_batch_drift`) looks at unmatched
-pairs that still share an exact reference and checks whether their amount
-ratios cluster tightly around a common value. If three or more do, it
-re-labels them `systematic_drift_suspected` with the detected ratio
-instead of leaving them as N generic exceptions — so the exception list
-says "investigate a 3.5% batch-wide drift" instead of burying the signal
-in a pile of one-off rows.
-
-This is the honest version of "what broke": a tolerance-band matcher is
-correct for per-transaction noise (fees, rounding) but blind to
-batch-level shifts by construction, and needed an explicit second check.
+**2. The orchestrator's own router had a keyword bug.** The first working
+version routed `"reconcil|run recon..."` — but `"reconcile"` is not
+actually a substring of `"reconciliation"` (`reconcile` and `reconciliation`
+diverge after `reconcil`: e-vs-i). So typing "run reconciliation" — the
+single most obvious thing a user would type — silently fell through to
+the Q&A agent's generic fallback message instead of running the pipeline.
+Caught by an actual terminal smoke test, not code review; fixed by
+matching the stem (`reconcil\w*`) instead of the whole word. A reminder
+that a router built by pattern-matching keywords needs to be tested with
+the keywords a *user* would actually type, not the ones the author
+happened to write first.
 
 ## Known limitations
 
-- Fuzzy ref matching (`difflib.SequenceMatcher`) is fine for single-character
-  typos but won't catch a fully re-issued reference ID — that would need a
-  learned matcher or a merchant-side reference map.
+- The orchestrator's routing is keyword-based, not intent-classified by an
+  LLM — it will misroute a phrasing that doesn't match any pattern (falls
+  through to Q&A, which at least won't fabricate an answer, but won't run
+  the right specialist either).
+- Fuzzy ref matching (`difflib.SequenceMatcher`) handles single-character
+  typos but not a fully re-issued reference ID.
 - The drift detector needs 3+ affected rows sharing an exact reference to
   trigger; a single anomalous transaction still shows up as a plain
   exception, correctly.
+- The cash forecast is a linear trend over historical settlement, not a
+  seasonality-aware model — intentionally simple and auditable rather than
+  a black-box estimate.
 - Synthetic data only — no real Razorpay API calls are made (matches the
   track's test-mode / synthetic-data framing).
 
 ## Project layout
 
 ```
-cli.py                 entry point
-app.py                 Streamlit dashboard
+cli.py                    reconciliation-only entry point
+agent_cli.py               multi-agent terminal chat entry point
+app.py                     Streamlit dashboard + agent chat box
 recon/
-  generate_data.py     synthetic ledger + settlement + ground truth
-  matcher.py            3-pass matching engine + batch-drift detector
-  explainer.py          LLM / template exception explanations
-  scorer.py              accuracy scoring against ground truth
-  pipeline.py            orchestrates the above, writes reports/
-tests/                  pytest unit tests for matcher + scorer
+  generate_data.py         synthetic ledger + settlement + ground truth
+  matcher.py                3-pass matching engine + batch-drift detector
+  explainer.py               LLM / template exception explanations
+  scorer.py                    accuracy scoring against ground truth
+  pipeline.py                   orchestrates the above, writes reports/
+agents/
+  orchestrator.py           routes a message to the right specialist
+  qa_agent.py                 grounded settlement Q&A
+  forecast_agent.py            cash forecast + at-risk amount
+  exception_agent.py            exception triage / prioritization
+  action_ledger.py               shared, bounded, gated audit trail
+tests/                     30 pytest tests across recon/ and agents/
 ```
 
 ## Filling out the application form
 
-- **Project name**: Recon — AI Finance Controller
+- **Project name**: Ledger — a multi-agent AI Finance Controller
 - **What it solves**: see "What it solves" above
 - **Track**: AI Finance Controller
-- **What broke, and how you got out**: see "What broke" above — adapt it
-  to your own words, and ideally add your own debugging story once you've
-  run it, poked at it, and (better yet) broken something yourself.
+- **What broke, and how you got out**: see "What broke" above — both bugs
+  are real and both were caught by actually running the thing, not by
+  reading the code. Adapt to your own words, and add your own story once
+  you've broken something yourself.

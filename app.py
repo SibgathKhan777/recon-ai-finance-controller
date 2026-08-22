@@ -1,4 +1,4 @@
-"""Streamlit dashboard for the reconciliation agent.
+"""Streamlit dashboard for the AI Finance Controller multi-agent system.
 
 Run: streamlit run app.py
 (run `python cli.py demo` at least once first to generate reports/)
@@ -9,11 +9,14 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from agents import forecast_agent
+from agents.orchestrator import handle as agent_handle
+
 REPORTS_DIR = Path(__file__).resolve().parent / "reports"
 
-st.set_page_config(page_title="AI Finance Controller - Recon Agent", layout="wide")
-st.title("AI Finance Controller — Reconciliation Agent")
-st.caption("Deterministic matching + LLM exception explanations, scored against known ground truth.")
+st.set_page_config(page_title="AI Finance Controller", layout="wide")
+st.title("AI Finance Controller — multi-agent system")
+st.caption("Reconciliation, Settlement Q&A, Cash Forecaster and Exception & Anomaly agents, all grounded in scored real data.")
 
 summary_path = REPORTS_DIR / "summary.json"
 if not summary_path.exists():
@@ -60,3 +63,24 @@ with st.expander("Misclassified rows (matcher disagreed with ground truth)"):
         st.dataframe(pd.DataFrame(misses))
     else:
         st.write("None — every ground-truth row was categorized correctly in this run.")
+
+st.subheader("Cash forecast")
+st.caption("Pure arithmetic over real settlement data, plus the reconciliation agent's own exception list — no LLM, nothing estimated that could just be computed.")
+horizon = st.slider("Forecast horizon (days)", 3, 30, 7)
+forecast = forecast_agent.forecast(horizon_days=horizon)
+if "error" in forecast:
+    st.info(forecast["error"])
+else:
+    proj_df = pd.DataFrame(forecast["projection"])
+    st.line_chart(proj_df.set_index("date")["projected_amount"])
+    fcol1, fcol2 = st.columns(2)
+    fcol1.metric("Historical daily avg settlement", f"Rs.{forecast['historical_daily_average']:,.2f}")
+    fcol2.metric("At risk (pending settlement)", f"Rs.{forecast['at_risk_amount_pending_settlement']:,.2f}")
+    if forecast["drift_note"]:
+        st.warning(forecast["drift_note"])
+
+st.subheader("Ask the Finance Controller")
+st.caption("Routed by the orchestrator to whichever specialist agent can actually answer — try a reference ID, or ask about fees, duplicates, drift, or match rate.")
+user_question = st.text_input("Ask a question", placeholder="why didn't RZP... settle / show duplicate exceptions / what's our match rate")
+if user_question:
+    st.code(agent_handle(user_question), language=None)
