@@ -9,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from agents import forecast_agent
+from agents import claim_verifier, forecast_agent
 from agents.orchestrator import handle as agent_handle
 
 REPORTS_DIR = Path(__file__).resolve().parent / "reports"
@@ -51,8 +51,8 @@ with st.container(horizontal=True):
     st.metric("Exceptions", summary["exceptions"], border=True)
     st.metric("Accuracy vs ground truth", f"{(summary['overall_accuracy'] or 0) * 100:.1f}%", border=True)
 
-overview_tab, exceptions_tab, matches_tab, forecast_tab, ask_tab = st.tabs([
-    "Overview", "Exceptions", "Matched pairs", "Cash forecast", "Ask the controller",
+overview_tab, exceptions_tab, matches_tab, forecast_tab, ask_tab, claim_tab = st.tabs([
+    "Overview", "Exceptions", "Matched pairs", "Cash forecast", "Ask the controller", "Verify a claim",
 ])
 
 with overview_tab:
@@ -151,3 +151,56 @@ with ask_tab:
         with st.chat_message("assistant"):
             st.write(response)
         st.session_state.chat_history.append({"role": "assistant", "content": response})
+
+with claim_tab:
+    st.caption("A customer or merchant claims something happened to a payment. Check it against the actual reconciliation record instead of taking it at face value.")
+    st.caption("Never declares anyone dishonest — a mismatch is flagged for human review, not resolved automatically.")
+
+    if "claim_chat_history" not in st.session_state:
+        st.session_state.claim_chat_history = []
+
+    for message in st.session_state.claim_chat_history:
+        with st.chat_message(message["role"]):
+            st.write(message["content"])
+
+    claim_prompt = None
+    if not st.session_state.claim_chat_history:
+        claim_examples = {}
+        matches_path = REPORTS_DIR / "matches.csv"
+        exceptions_path = REPORTS_DIR / "exceptions.csv"
+        if matches_path.exists() and matches_path.stat().st_size > 0:
+            ref = pd.read_csv(matches_path)["txn_ref"].iloc[0]
+            label = f":red[:material/report:] \"I never received my payout for {ref}\""
+            claim_examples[label] = f"I never received my payout for {ref}"
+        if exceptions_path.exists() and exceptions_path.stat().st_size > 0:
+            exc_df = pd.read_csv(exceptions_path)
+            exc_refs = exc_df[exc_df["txn_ref"] != ""]
+            if len(exc_refs):
+                ref = exc_refs["txn_ref"].iloc[0]
+                label = f":green[:material/check_circle:] \"My payment {ref} went through fine\""
+                claim_examples[label] = f"My payment {ref} went through fine"
+        if claim_examples:
+            selected_claim = st.pills("Try a claim:", list(claim_examples.keys()), label_visibility="collapsed")
+            if selected_claim:
+                claim_prompt = claim_examples[selected_claim]
+
+    typed_claim = st.chat_input("Describe what the customer or merchant is claiming")
+    if typed_claim:
+        claim_prompt = typed_claim
+
+    if claim_prompt:
+        st.session_state.claim_chat_history.append({"role": "user", "content": claim_prompt})
+        with st.chat_message("user"):
+            st.write(claim_prompt)
+        result = claim_verifier.verify(claim_prompt)
+        badge_color = {
+            "confirmed": "green",
+            "contradicted": "red",
+            "no_record": "gray",
+            "no_reference": "gray",
+        }[result["verdict"]]
+        verdict_label = result["verdict"].replace("_", " ")
+        formatted = f":{badge_color}-badge[{verdict_label}]  \n{result['message']}"
+        with st.chat_message("assistant"):
+            st.write(formatted)
+        st.session_state.claim_chat_history.append({"role": "assistant", "content": formatted})

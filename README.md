@@ -3,9 +3,10 @@
 ![tests](https://github.com/SibgathKhan777/recon-ai-finance-controller/actions/workflows/tests.yml/badge.svg)
 
 An orchestrator agent that routes finance-ops questions to specialist
-agents — Reconciliation, Settlement Q&A, Cash Forecaster, and Exception &
-Anomaly — each grounded in real, scored data. No agent invents a number;
-every figure in every answer traces back to an actual row.
+agents — Reconciliation, Settlement Q&A, Cash Forecaster, Exception &
+Anomaly, and Claim Verification — each grounded in real, scored data. No
+agent invents a number; every figure in every answer traces back to an
+actual row.
 
 Built for the **Razorpay AI Buildathon — Track 04: AI Finance Controller**.
 
@@ -24,13 +25,14 @@ bounded audit trail — not a single script that does one thing.
 
 Every payments business runs a version of the same loop: the ledger says
 one thing, the settlement file says another, cash needs to be forecast
-under uncertainty, and someone has to answer "why didn't this settle" on
-demand. Four agents split that work:
+under uncertainty, someone has to answer "why didn't this settle" on
+demand, and a customer or merchant's claim about a payment needs checking
+against reality rather than taken on faith. Five agents split that work:
 
 - **Reconciliation Agent** — matches ledger against settlement across
-  three passes (exact → tolerance → fuzzy), and catches *systemic* drift
-  (a currency/fee-schedule change) as one root cause instead of dozens of
-  one-off exceptions.
+  three passes (exact → gross arithmetic → fuzzy), and catches *systemic*
+  drift (a currency/fee-schedule change) as one root cause instead of
+  dozens of one-off exceptions.
 - **Settlement Q&A Agent** — answers "why didn't RZP... settle", fee
   totals, duplicate lists, drift status, and match-rate questions in plain
   English, grounded only in the actual reconciliation output.
@@ -40,35 +42,47 @@ demand. Four agents split that work:
 - **Exception & Anomaly Agent** — proactively triages the exception list:
   which rows are one-offs to clear, and which are one systemic issue
   wearing thirty different transaction IDs.
+- **Claim Verification Agent** — checks a customer or merchant's claim
+  about a payment ("I never received my payout for RZP...") against the
+  actual reconciliation record. Never declares anyone dishonest — a
+  mismatch is flagged for human review via the same action ledger, not
+  auto-resolved.
 
 ## Architecture
 
 ```
-                    ┌──────────────────────────┐
-   "why didn't      │     Orchestrator          │  agents/orchestrator.py
-   RZP... settle?"   │  rule-based intent router │  no API key needed to route —
-   "cash forecast    │  (agent_cli.py / app.py)  │  always inspectable, never a
-   for 14 days"      └────────────┬─────────────┘  black box
+              "why didn't RZP... settle?"  /  "cash forecast for 14 days"  /
+              "I never received my payout for RZP..."
                                    │
-        ┌──────────────┬──────────┼──────────────┬───────────────┐
-        ▼              ▼          ▼              ▼               │
-  Reconciliation   Settlement  Cash          Exception &          │
-  Agent            Q&A Agent  Forecaster     Anomaly Agent        │
-  (recon/*)        (agents/   (agents/       (agents/             │
-                    qa_agent)  forecast_     exception_agent)     │
-                               agent)                             │
-        │              │          │              │                │
-        └──────────────┴──────────┴──────────────┴────────────────┘
                                    ▼
+                    ┌──────────────────────────┐
+                    │       Orchestrator        │   agents/orchestrator.py
+                    │  rule-based intent router │   no API key needed to route —
+                    │  (agent_cli.py / app.py)  │   always inspectable, never
+                    └────────────┬─────────────┘   a black box
+                                  │
+     ┌───────────────┬───────────┼───────────┬───────────────┬────────────────┐
+     ▼               ▼           ▼           ▼               ▼
+Reconciliation   Settlement   Cash        Exception &     Claim
+Agent            Q&A Agent   Forecaster   Anomaly Agent   Verification Agent
+(recon/*)        (agents/    (agents/     (agents/        (agents/
+                 qa_agent)   forecast_    exception_       claim_verifier)
+                             agent)       agent)
+     │               │           │           │               │
+     └───────────────┴───────────┴───────────┴───────────────┘
+                                  ▼
                     Shared Action Ledger (agents/action_ledger.py)
-                    every action logged, amounts >= Rs.5,000 flagged
+                    every action logged; amount ≥ Rs.5,000, confidence
+                    < 0.8, or a contradicted claim always gets flagged
                     needs_human_approval — explainable, bounded, gated
 ```
 
 The Reconciliation Agent's own output (`reports/exceptions.csv`,
-`summary.json`) is the shared substrate the other three agents read from —
-the Cash Forecaster's "at risk" figure and drift warning come directly
-from the Reconciliation Agent's exception list, not a separate estimate.
+`summary.json`, `matches.csv`) is the shared substrate the other four
+agents read from — the Cash Forecaster's "at risk" figure and drift
+warning, and the Claim Verification Agent's factual check, all come
+directly from the Reconciliation Agent's own records, not a separate
+estimate.
 
 The matching core stays deliberately **not** LLM-based — exact/fuzzy/
 tolerance matching is cheap, fast, and auditable. The LLM (optional,
@@ -102,6 +116,7 @@ Try in `agent_cli.py`:
 > cash forecast for 14 days
 > show duplicate exceptions
 > triage exceptions
+> verify claim: I never received my payout for RZP123456789
 ```
 
 ## Commands
@@ -111,9 +126,9 @@ Try in `agent_cli.py`:
 | `python cli.py demo` | generate data + run the reconciliation pipeline + print summary |
 | `python cli.py generate --corrupt currency` | regenerate data with an injected batch-level anomaly |
 | `python cli.py run` | re-run the pipeline against already-generated data |
-| `python agent_cli.py` | interactive terminal chat across all four agents |
-| `streamlit run app.py` | dashboard: metrics, exception explorer, cash forecast chart, agent chat box |
-| `python -m pytest` | 80 tests: unit tests across the matcher/scorer/agents, plus end-to-end user-journey tests that spawn the real CLI as subprocesses |
+| `python agent_cli.py` | interactive terminal chat across all five agents |
+| `streamlit run app.py` | dashboard: metrics, exception explorer, cash forecast chart, agent chat box, claim verification tab |
+| `python -m pytest` | 92 tests: unit tests across the matcher/scorer/agents, plus end-to-end user-journey tests that spawn the real CLI as subprocesses |
 
 ## Honest numbers, not a demo trick
 
@@ -304,8 +319,9 @@ agents/
   qa_agent.py                 grounded settlement Q&A
   forecast_agent.py            cash forecast + at-risk amount
   exception_agent.py            exception triage / prioritization
-  action_ledger.py               shared, bounded, gated audit trail
-tests/                     67 pytest tests: unit-level across recon/ and agents/,
+  claim_verifier.py              checks a user's claim against the record
+  action_ledger.py                 shared, bounded, gated audit trail
+tests/                     92 pytest tests: unit-level across recon/ and agents/,
                            plus test_user_journey.py -- real subprocess sessions
                            that act as a user typing into cli.py / agent_cli.py
 ```

@@ -27,6 +27,22 @@ def test_routes_qa_fallback():
     assert "Match rate" in result
 
 
+def test_routes_verify_claim_with_explicit_trigger_phrase():
+    import csv
+    from pathlib import Path
+
+    ref = list(csv.DictReader(open(Path(__file__).resolve().parent.parent / "reports" / "matches.csv")))[0]["txn_ref"]
+    result = handle(f"verify claim: I never received my payout for {ref}")
+    assert result.startswith("[contradicted]")
+
+
+def test_plain_claim_text_without_trigger_phrase_falls_through_to_qa():
+    # confirms the persona separation is real -- a bare claim sentence
+    # without the trigger phrase is NOT silently routed to claim_verifier
+    result = handle("I never received my payout for RZP999999998")
+    assert not result.startswith("[")
+
+
 def test_running_reconciliation_logs_non_trivial_matches_to_the_audit_trail():
     before = len(action_ledger.read_all())
     handle("run reconciliation")

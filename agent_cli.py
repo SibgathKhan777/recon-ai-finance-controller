@@ -15,12 +15,13 @@ Try:
   cash forecast for 14 days
   show duplicate exceptions
   triage exceptions
+  verify claim: I never received my payout for RZP123456789
 """
 from agents.orchestrator import handle
 
 BANNER = """
 AI Finance Controller -- multi-agent terminal
-Agents online: Reconciliation, Settlement Q&A, Cash Forecaster, Exception & Anomaly
+Agents online: Reconciliation, Settlement Q&A, Cash Forecaster, Exception & Anomaly, Claim Verification
 Type a question or command. Type 'exit' to quit.
 """.strip()
 
