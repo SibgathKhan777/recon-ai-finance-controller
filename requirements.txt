@@ -9,3 +9,10 @@ anthropic>=0.34.0
 langgraph>=1.0
 langchain>=1.0
 langchain-anthropic>=1.0
+
+# Used by ml/ -- a separate, standalone trained classifier (see ml/README.md).
+# Not imported by the live app or agents/ at all; only needed if you run
+# `python -m ml.train`, `ml/predict.py`, or the ml test files.
+scikit-learn>=1.5
+skops>=0.11
+huggingface_hub>=0.25

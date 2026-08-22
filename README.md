@@ -129,6 +129,14 @@ python agent_cli.py         # talk to the multi-agent system in your terminal
 streamlit run app.py        # or: dashboard with a chat box for the same agents
 ```
 
+`app.py`'s **"Upload data"** tab also takes your own ledger/settlement CSVs
+directly — no synthetic data required. It runs them through the same
+`recon/matcher.py` engine; the only difference is there's no ground truth
+to score accuracy against, so that shows as `N/A` rather than a
+percentage, honestly, instead of a fabricated number. See `ml/README.md`
+for a separate, standalone trained classifier (not used by the live app)
+built on the same synthetic data.
+
 No API key required for any of the above. Set `ANTHROPIC_API_KEY` (see
 `.env.example`) to let the Reconciliation Agent's exception explanations
 and the Q&A agent's open-ended answers be phrased by Claude instead of
@@ -157,7 +165,7 @@ Try in `agent_cli.py`:
 | `python cli.py run` | re-run the pipeline against already-generated data |
 | `python agent_cli.py` | interactive terminal chat across all five agents |
 | `streamlit run app.py` | dashboard: metrics, exception explorer, cash forecast chart, agent chat box, claim verification tab |
-| `python -m pytest` | 102 tests: unit tests across the matcher/scorer/agents, plus end-to-end user-journey tests that spawn the real CLI as subprocesses |
+| `python -m pytest` | 121 tests: unit tests across the matcher/scorer/agents, plus end-to-end user-journey tests that spawn the real CLI as subprocesses |
 
 ## Honest numbers, not a demo trick
 
@@ -302,6 +310,32 @@ freshly-generated Python object works fine, but a row read back from
 immediately on the first full-pipeline test run rather than needing to be
 hunted for.
 
+**6. Uploaded data silently fed the Cash Forecaster stale numbers.** After
+building the "Upload data" tab, the Cash Forecaster kept showing the
+*previous* dataset's forecast instead of the just-uploaded one — no error,
+no crash, just a quietly wrong number. Cause: `agents/forecast_agent.py`
+reads settlement data straight from `data/generated/settlement.csv`, and
+the upload path only wrote to `reports/`. Fixed by having the upload path
+also persist to `data/generated/` (and clear the stale `ground_truth.csv`
+alongside it, so it can't be mistaken for real labels on real data). Caught
+by checking the actual number shown after a real upload, not by assuming
+the existing forecast code would "just work" against new data.
+
+**7. A trained ML classifier scored a suspicious 100% — because the task
+was too easy, then, after fixing that, an actually-mislabeled example
+surfaced.** Full story in `ml/README.md`. Short version: random negative
+sampling made every model (including plain logistic regression) trivially
+separate the classes; switching to amount-closest hard negatives fixed
+that, but then surfaced cases that were genuinely feature-identical to a
+true match (duplicate-settlement clones, which are exact copies by
+design) — labeling those "not a match" would have been a direct label
+contradiction, not a hard example. Fixed by excluding them from the
+negative pool rather than mislabeling them. The corrected model reaches
+the deterministic matcher's own accuracy on held-out data, with feature
+importances converging on the same signal (`gross_reconciles`, reference
+similarity) the hand-written rules already use — a genuinely informative
+result, not a number chased to look good.
+
 ## Known limitations
 
 - The orchestrator's routing is keyword-based, not intent-classified by an
@@ -351,9 +385,16 @@ agents/
   claim_verifier.py              checks a user's claim against the record
   langgraph_orchestrator.py        optional LLM tool-calling router
   action_ledger.py                   shared, bounded, gated audit trail
-tests/                     102 pytest tests: unit-level across recon/ and agents/,
-                           plus test_user_journey.py -- real subprocess sessions
-                           that act as a user typing into cli.py / agent_cli.py
+ml/                        standalone trained classifier -- see ml/README.md
+  features.py               pairwise feature extraction
+  dataset.py                  builds a labeled set from generate_data.py
+  train.py                      trains + evaluates + saves model.skops
+  predict.py                      inference helper, not wired into the app
+  push_to_huggingface.py            pushes to your own HF Hub repo
+  model.skops, MODEL_CARD.md          the trained artifact + its writeup
+tests/                     121 pytest tests: unit-level across recon/, agents/,
+                           and ml/, plus test_user_journey.py -- real subprocess
+                           sessions that act as a user typing into cli.py / agent_cli.py
 ```
 
 ## Filling out the application form

@@ -64,14 +64,18 @@ def test_app_shows_cash_forecast_slider_and_chart():
     assert "At risk (pending settlement)" in labels
 
 
-def test_app_warns_when_no_report_exists():
+def test_app_stays_usable_with_no_report_yet():
+    # the app used to hard-stop with no report -- now the Upload tab must
+    # stay reachable even for a brand-new user with nothing generated yet
     summary_path = REPORTS_DIR / "summary.json"
     backup = summary_path.read_text()
     summary_path.unlink()
     try:
         at = _first_run()
         assert not at.exception
-        assert any("No report found" in w.value for w in at.warning)
+        assert any("No report yet" in i.value for i in at.info)
+        assert "Upload data" in [t.label for t in at.tabs]
+        assert len(at.file_uploader) == 2
     finally:
         summary_path.write_text(backup)
 
@@ -91,3 +95,80 @@ def test_chat_box_grounded_ref_lookup_does_not_hallucinate():
     at = _first_run()
     at.chat_input[0].set_value("why didn't RZP999999998 settle").run(timeout=TIMEOUT)
     assert any("no record" in text.lower() for text in _chat_message_text(at))
+
+
+def _restore_demo_state():
+    from recon.generate_data import generate
+    from recon.pipeline import run as run_demo
+    generate(seed=42)
+    run_demo()
+
+
+def test_upload_tab_reconciles_uploaded_csvs_end_to_end():
+    import json
+
+    ledger_csv = (
+        "ledger_id,txn_ref,date,amount\n"
+        "L1,ABC123,2026-08-01,1000.00\n"
+        "L2,ABC124,2026-08-02,500.00\n"
+        "L3,ABC125,2026-08-03,750.00\n"
+    )
+    settlement_csv = (
+        "settlement_id,txn_ref,date,amount\n"
+        "S1,ABC123,2026-08-01,1000.00\n"
+        "S2,ABC124,2026-08-02,500.00\n"
+    )
+    try:
+        at = _first_run()
+        at.file_uploader[0].set_value(("ledger.csv", ledger_csv.encode(), "text/csv"))
+        at.file_uploader[1].set_value(("settlement.csv", settlement_csv.encode(), "text/csv"))
+        at.run(timeout=TIMEOUT)
+        at.button[0].click().run(timeout=TIMEOUT)
+        assert not at.exception
+
+        summary = json.loads((REPORTS_DIR / "summary.json").read_text())
+        assert summary["ledger_rows"] == 3
+        assert summary["settlement_rows"] == 2
+        assert summary["matched_pairs"] == 2
+        assert summary["exceptions"] == 1
+        assert summary["has_ground_truth"] is False
+        assert summary["overall_accuracy"] is None
+    finally:
+        _restore_demo_state()
+
+
+def test_upload_tab_rejects_a_csv_missing_required_columns():
+    bad_ledger_csv = "id,ref,when,total\n1,ABC123,2026-08-01,1000.00\n"
+    settlement_csv = "settlement_id,txn_ref,date,amount\nS1,ABC123,2026-08-01,1000.00\n"
+    try:
+        at = _first_run()
+        at.file_uploader[0].set_value(("ledger.csv", bad_ledger_csv.encode(), "text/csv"))
+        at.file_uploader[1].set_value(("settlement.csv", settlement_csv.encode(), "text/csv"))
+        at.run(timeout=TIMEOUT)
+        at.button[0].click().run(timeout=TIMEOUT)
+        assert not at.exception
+        assert any("missing required column" in e.value.lower() for e in at.error)
+    finally:
+        _restore_demo_state()
+
+
+def test_uploaded_data_flows_into_the_cash_forecaster_not_stale_demo_data():
+    # regression test for a real bug: the forecaster reads data/generated/
+    # settlement.csv directly, not reports/ -- uploading without persisting
+    # there left it silently showing the previous (demo) dataset's forecast
+    ledger_csv = "ledger_id,txn_ref,date,amount\nL1,ABC123,2026-08-01,1000.00\nL2,ABC124,2026-08-02,500.00\n"
+    settlement_csv = "settlement_id,txn_ref,date,amount\nS1,ABC123,2026-08-01,1000.00\nS2,ABC124,2026-08-02,500.00\n"
+    try:
+        at = _first_run()
+        at.file_uploader[0].set_value(("ledger.csv", ledger_csv.encode(), "text/csv"))
+        at.file_uploader[1].set_value(("settlement.csv", settlement_csv.encode(), "text/csv"))
+        at.run(timeout=TIMEOUT)
+        at.button[0].click().run(timeout=TIMEOUT)
+        assert not at.exception
+
+        labels = {m.label: m.value for m in at.metric}
+        # 1000 + 500 = 1500 across 2 days = 750/day -- not whatever the
+        # previous (much larger, many-row) demo dataset would show
+        assert labels["Historical daily avg settlement"] == "Rs.750.00"
+    finally:
+        _restore_demo_state()

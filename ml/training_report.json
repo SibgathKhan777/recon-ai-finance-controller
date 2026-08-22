@@ -1,0 +1,85 @@
+{
+  "task": "binary pairwise match classification (is this ledger/settlement pair a real match?)",
+  "train_examples": 38080,
+  "test_examples": 8160,
+  "train_seed_range": [
+    1,
+    70
+  ],
+  "test_seed_range": [
+    1000,
+    1014
+  ],
+  "feature_names": [
+    "amount_diff",
+    "amount_diff_pct",
+    "date_diff_days",
+    "ref_exact_match",
+    "ref_similarity",
+    "has_ledger_ref",
+    "has_settlement_ref",
+    "gross_reconciles",
+    "ledger_amount",
+    "settlement_amount"
+  ],
+  "random_forest": {
+    "accuracy": 1.0,
+    "classification_report": {
+      "0": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1-score": 1.0,
+        "support": 6120.0
+      },
+      "1": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1-score": 1.0,
+        "support": 2040.0
+      },
+      "accuracy": 1.0,
+      "macro avg": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1-score": 1.0,
+        "support": 8160.0
+      },
+      "weighted avg": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1-score": 1.0,
+        "support": 8160.0
+      }
+    },
+    "confusion_matrix": [
+      [
+        6120,
+        0
+      ],
+      [
+        0,
+        2040
+      ]
+    ],
+    "feature_importances": {
+      "amount_diff": 0.1002317779010332,
+      "amount_diff_pct": 0.07338082363896845,
+      "date_diff_days": 0.053652399518035514,
+      "ref_exact_match": 0.18872407947848174,
+      "ref_similarity": 0.25242092792812426,
+      "has_ledger_ref": 0.0009459217871805839,
+      "has_settlement_ref": 0.0005392019784440078,
+      "gross_reconciles": 0.33008221797655274,
+      "ledger_amount": 3.837429346196349e-06,
+      "settlement_amount": 1.8812363833328068e-05
+    }
+  },
+  "logistic_regression_baseline": {
+    "accuracy": 1.0
+  },
+  "deterministic_matcher_on_same_seeds": {
+    "correct": 2040,
+    "total": 2040,
+    "accuracy": 1.0
+  }
+}

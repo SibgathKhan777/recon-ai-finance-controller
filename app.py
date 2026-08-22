@@ -11,8 +11,16 @@ import streamlit as st
 
 from agents import claim_verifier, forecast_agent
 from agents.orchestrator import smart_handle as agent_handle
+from recon import pipeline
 
 REPORTS_DIR = Path(__file__).resolve().parent / "reports"
+
+LEDGER_REQUIRED_COLUMNS = ["ledger_id", "txn_ref", "date", "amount"]
+SETTLEMENT_REQUIRED_COLUMNS = ["settlement_id", "txn_ref", "date", "amount"]
+NO_DATA_MESSAGE = (
+    "No report yet — upload your own ledger/settlement CSVs in the "
+    "\"Upload data\" tab, or run `python cli.py demo` for a synthetic walkthrough."
+)
 
 CATEGORY_BADGE_COLOR = {
     "exact": "green",
@@ -39,71 +47,150 @@ st.title("AI Finance Controller — multi-agent system")
 st.caption("Reconciliation, Settlement Q&A, Cash Forecaster and Exception & Anomaly agents, all grounded in scored real data.")
 
 summary_path = REPORTS_DIR / "summary.json"
-if not summary_path.exists():
-    st.warning("No report found yet. Run `python cli.py demo` first, then reload this page.", icon=":material/warning:")
-    st.stop()
+has_report = summary_path.exists()
+summary = json.loads(summary_path.read_text()) if has_report else None
+has_ground_truth = bool(summary and summary.get("has_ground_truth"))
 
-summary = json.loads(summary_path.read_text())
-
-with st.container(horizontal=True):
-    st.metric("Ledger rows", summary["ledger_rows"], border=True)
-    st.metric("Match rate", f"{summary['match_rate'] * 100:.1f}%", border=True)
-    st.metric("Exceptions", summary["exceptions"], border=True)
-    st.metric("Accuracy vs ground truth", f"{(summary['overall_accuracy'] or 0) * 100:.1f}%", border=True)
-
-overview_tab, exceptions_tab, matches_tab, forecast_tab, ask_tab, claim_tab = st.tabs([
-    "Overview", "Exceptions", "Matched pairs", "Cash forecast", "Ask the controller", "Verify a claim",
+upload_tab, overview_tab, exceptions_tab, matches_tab, forecast_tab, ask_tab, claim_tab = st.tabs([
+    "Upload data", "Overview", "Exceptions", "Matched pairs", "Cash forecast", "Ask the controller", "Verify a claim",
 ])
 
-with overview_tab:
-    with st.container(border=True):
-        st.markdown("**Accuracy by category**")
-        per_cat = summary["per_category"]
-        cat_df = pd.DataFrame([
-            {"category": cat, "correct": v["correct"], "total": v["total"], "accuracy": v["accuracy"]}
-            for cat, v in per_cat.items()
-        ])
-        st.bar_chart(cat_df.set_index("category")["accuracy"])
-        st.dataframe(cat_df, width="stretch", hide_index=True)
+with upload_tab:
+    st.caption(
+        "Bring your own ledger and settlement CSVs and run them through the same "
+        "reconciliation engine as the synthetic demo. No ground-truth labels are "
+        "expected for real data, so accuracy isn't shown here — just what actually matched."
+    )
+    st.markdown(
+        f"**Ledger CSV** needs columns: `{', '.join(LEDGER_REQUIRED_COLUMNS)}` "
+        "(optional: `merchant`, `description`)"
+    )
+    st.markdown(
+        f"**Settlement CSV** needs columns: `{', '.join(SETTLEMENT_REQUIRED_COLUMNS)}` "
+        "(optional: `merchant`, `description`, `fee`, `tax`, `utr`)"
+    )
 
-    with st.expander("Misclassified rows (matcher disagreed with ground truth)", icon=":material/error:"):
-        misses = summary.get("misclassified", [])
-        if misses:
-            st.dataframe(pd.DataFrame(misses), width="stretch", hide_index=True)
-        else:
-            st.write("None — every ground-truth row was categorized correctly in this run.")
+    ledger_file = st.file_uploader("Ledger CSV", type="csv", key="ledger_upload")
+    settlement_file = st.file_uploader("Settlement CSV", type="csv", key="settlement_upload")
+
+    if st.button("Run reconciliation on this data", type="primary", disabled=not (ledger_file and settlement_file)):
+        try:
+            ledger_df = pd.read_csv(ledger_file)
+            settlement_df = pd.read_csv(settlement_file)
+            missing_ledger_cols = [c for c in LEDGER_REQUIRED_COLUMNS if c not in ledger_df.columns]
+            missing_settlement_cols = [c for c in SETTLEMENT_REQUIRED_COLUMNS if c not in settlement_df.columns]
+            if missing_ledger_cols or missing_settlement_cols:
+                if missing_ledger_cols:
+                    st.error(f"Ledger CSV is missing required column(s): {', '.join(missing_ledger_cols)}")
+                if missing_settlement_cols:
+                    st.error(f"Settlement CSV is missing required column(s): {', '.join(missing_settlement_cols)}")
+            else:
+                for col, default in [("merchant", ""), ("description", "")]:
+                    if col not in ledger_df.columns:
+                        ledger_df[col] = default
+                for col, default in [("merchant", ""), ("description", ""), ("fee", 0.0), ("tax", 0.0), ("utr", "")]:
+                    if col not in settlement_df.columns:
+                        settlement_df[col] = default
+
+                ledger_records = ledger_df.fillna("").astype(str).to_dict("records")
+                settlement_records = settlement_df.fillna("").astype(str).to_dict("records")
+                with st.spinner("Reconciling..."):
+                    result_summary = pipeline.run_uploaded(ledger_records, settlement_records)
+                st.success(
+                    f"Done: {result_summary['matched_pairs']}/{result_summary['ledger_rows']} matched "
+                    f"({result_summary['match_rate'] * 100:.1f}%), {result_summary['exceptions']} exceptions. "
+                    "See the other tabs for the full breakdown."
+                )
+                st.session_state.pop("chat_history", None)
+                st.session_state.pop("claim_chat_history", None)
+                st.rerun()
+        except Exception as e:
+            st.error(f"Couldn't process those files: {e}")
+
+if not has_report:
+    with overview_tab:
+        st.info(NO_DATA_MESSAGE)
+else:
+    with st.container(horizontal=True):
+        st.metric("Ledger rows", summary["ledger_rows"], border=True)
+        st.metric("Match rate", f"{summary['match_rate'] * 100:.1f}%", border=True)
+        st.metric("Exceptions", summary["exceptions"], border=True)
+        accuracy_display = f"{(summary['overall_accuracy'] or 0) * 100:.1f}%" if has_ground_truth else "N/A"
+        st.metric("Accuracy vs ground truth", accuracy_display, border=True)
+
+    with overview_tab:
+        matches_path = REPORTS_DIR / "matches.csv"
+        exceptions_path = REPORTS_DIR / "exceptions.csv"
+        all_categories = []
+        if matches_path.exists() and matches_path.stat().st_size > 0:
+            all_categories.append(pd.read_csv(matches_path)[["category"]])
+        if exceptions_path.exists() and exceptions_path.stat().st_size > 0:
+            all_categories.append(pd.read_csv(exceptions_path)[["category"]])
+
+        with st.container(border=True):
+            if has_ground_truth:
+                st.markdown("**Accuracy by category**")
+                per_cat = summary["per_category"]
+                cat_df = pd.DataFrame([
+                    {"category": cat, "correct": v["correct"], "total": v["total"], "accuracy": v["accuracy"]}
+                    for cat, v in per_cat.items()
+                ])
+                st.bar_chart(cat_df.set_index("category")["accuracy"])
+                st.dataframe(cat_df, width="stretch", hide_index=True)
+            elif all_categories:
+                st.markdown("**Category breakdown**")
+                st.caption("No ground truth for uploaded data, so this shows counts, not accuracy.")
+                counts = pd.concat(all_categories)["category"].value_counts().reset_index()
+                counts.columns = ["category", "count"]
+                st.bar_chart(counts.set_index("category")["count"])
+                st.dataframe(counts, width="stretch", hide_index=True)
+
+    if has_ground_truth:
+        with overview_tab:
+            with st.expander("Misclassified rows (matcher disagreed with ground truth)", icon=":material/error:"):
+                misses = summary.get("misclassified", [])
+                if misses:
+                    st.dataframe(pd.DataFrame(misses), width="stretch", hide_index=True)
+                else:
+                    st.write("None — every ground-truth row was categorized correctly in this run.")
 
 with exceptions_tab:
-    exceptions_path = REPORTS_DIR / "exceptions.csv"
-    if exceptions_path.exists() and exceptions_path.stat().st_size > 0:
-        exc_df = pd.read_csv(exceptions_path).fillna("")
-
-        with st.container(horizontal=True):
-            for cat, count in exc_df["category"].value_counts().items():
-                st.badge(f"{cat}: {count}", color=CATEGORY_BADGE_COLOR.get(cat, "gray"))
-
-        categories = ["All"] + sorted(exc_df["category"].unique().tolist())
-        choice = st.selectbox("Filter by category", categories)
-        if choice != "All":
-            exc_df = exc_df[exc_df["category"] == choice]
-        st.dataframe(exc_df, width="stretch", hide_index=True)
+    if not has_report:
+        st.info(NO_DATA_MESSAGE)
     else:
-        st.info("No exceptions in this run.")
+        exceptions_path = REPORTS_DIR / "exceptions.csv"
+        if exceptions_path.exists() and exceptions_path.stat().st_size > 0:
+            exc_df = pd.read_csv(exceptions_path).fillna("")
+
+            with st.container(horizontal=True):
+                for cat, count in exc_df["category"].value_counts().items():
+                    st.badge(f"{cat}: {count}", color=CATEGORY_BADGE_COLOR.get(cat, "gray"))
+
+            categories = ["All"] + sorted(exc_df["category"].unique().tolist())
+            choice = st.selectbox("Filter by category", categories)
+            if choice != "All":
+                exc_df = exc_df[exc_df["category"] == choice]
+            st.dataframe(exc_df, width="stretch", hide_index=True)
+        else:
+            st.info("No exceptions in this run.")
 
 with matches_tab:
-    matches_path = REPORTS_DIR / "matches.csv"
-    if matches_path.exists() and matches_path.stat().st_size > 0:
-        matches_df = pd.read_csv(matches_path).fillna("")
-        st.dataframe(
-            matches_df,
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "confidence": st.column_config.ProgressColumn(
-                    "confidence", min_value=0.0, max_value=1.0, format="%.2f",
-                ),
-            },
-        )
+    if not has_report:
+        st.info(NO_DATA_MESSAGE)
+    else:
+        matches_path = REPORTS_DIR / "matches.csv"
+        if matches_path.exists() and matches_path.stat().st_size > 0:
+            matches_df = pd.read_csv(matches_path).fillna("")
+            st.dataframe(
+                matches_df,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "confidence": st.column_config.ProgressColumn(
+                        "confidence", min_value=0.0, max_value=1.0, format="%.2f",
+                    ),
+                },
+            )
 
 with forecast_tab:
     st.caption("Pure arithmetic over real settlement data, plus the reconciliation agent's own exception list — no LLM, nothing estimated that could just be computed.")
