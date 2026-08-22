@@ -76,14 +76,18 @@ def test_app_warns_when_no_report_exists():
         summary_path.write_text(backup)
 
 
+def _chat_message_text(at):
+    return [m.value for cm in at.chat_message for m in cm.markdown]
+
+
 def test_chat_box_routes_through_the_real_orchestrator():
     at = _first_run()
-    at.text_input[0].input("what's our match rate").run(timeout=TIMEOUT)
+    at.chat_input[0].set_value("what's our match rate").run(timeout=TIMEOUT)
     assert not at.exception
-    assert any("Match rate" in c.value for c in at.code)
+    assert any("Match rate" in text for text in _chat_message_text(at))
 
 
 def test_chat_box_grounded_ref_lookup_does_not_hallucinate():
     at = _first_run()
-    at.text_input[0].input("why didn't RZP999999998 settle").run(timeout=TIMEOUT)
-    assert any("no record" in c.value.lower() for c in at.code)
+    at.chat_input[0].set_value("why didn't RZP999999998 settle").run(timeout=TIMEOUT)
+    assert any("no record" in text.lower() for text in _chat_message_text(at))

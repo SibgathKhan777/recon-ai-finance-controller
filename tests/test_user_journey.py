@@ -141,11 +141,14 @@ def test_dashboard_user_session_with_multiple_questions_in_one_visit():
 
     ref = _real_ref()
 
-    at.text_input[0].input("what's our match rate").run(timeout=60)
-    assert any("Match rate" in c.value for c in at.code)
+    def chat_text(app_test):
+        return [m.value for cm in app_test.chat_message for m in cm.markdown]
 
-    at.text_input[0].input(f"why didn't {ref} settle").run(timeout=60)
-    assert any(ref in c.value for c in at.code)
+    at.chat_input[0].set_value("what's our match rate").run(timeout=60)
+    assert any("Match rate" in text for text in chat_text(at))
+
+    at.chat_input[0].set_value(f"why didn't {ref} settle").run(timeout=60)
+    assert any(ref in text for text in chat_text(at))
 
     at.slider[0].set_value(21).run(timeout=60)
     assert not at.exception
