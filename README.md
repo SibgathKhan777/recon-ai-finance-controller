@@ -614,14 +614,4 @@ ml/                        standalone trained classifier -- see ml/README.md
 tests/                     180 pytest tests: unit-level across recon/, agents/,
                            and ml/, plus test_user_journey.py -- real subprocess
                            sessions that act as a user typing into cli.py / agent_cli.py
-```
 
-## Filling out the application form
-
-- **Project name**: Ledger — a multi-agent AI Finance Controller
-- **What it solves**: see "What it solves" above
-- **Track**: AI Finance Controller
-- **What broke, and how you got out**: see "What broke" above — every one
-  is real and was caught by actually running the thing, not by reading
-  the code. Adapt to your own words, and add your own story once you've
-  broken something yourself.
