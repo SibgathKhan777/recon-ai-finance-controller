@@ -3,6 +3,12 @@ streamlit>=1.30
 pytest>=7.4
 anthropic>=0.34.0
 
+# Used by backend/main.py -- the FastAPI session API behind frontend/, the
+# chat-based multi-client UI. app.py (Streamlit) and cli.py don't need these.
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+
 # Optional: only used by agents/langgraph_orchestrator.py, which itself is
 # only reached when ANTHROPIC_API_KEY is set (see agents.orchestrator.
 # smart_handle). The app runs fully without these -- guarded by ImportError.

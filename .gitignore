@@ -7,6 +7,8 @@ data/generated/*
 !data/generated/.gitkeep
 reports/*
 !reports/.gitkeep
+data/sessions/
+reports/sessions/
 .DS_Store
 .agents/
 .claude/skills/

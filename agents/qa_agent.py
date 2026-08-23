@@ -14,9 +14,18 @@ import os
 import re
 from pathlib import Path
 
+from recon import formula
+
 REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 
 REF_PATTERN = re.compile(r"\b(RZP[0-9A-Z]+)\b", re.I)
+# Requires an explicit "compute"/"calculate" trigger, checked before the
+# generic REF_PATTERN below -- otherwise a plain reference match would
+# swallow this before the formula ever gets parsed, the same substring/
+# ordering trap that bit agents/orchestrator.py's bank/tax routing.
+COMPUTE_PATTERN = re.compile(
+    r"^\s*(?:compute|calculate)\s+(?P<expr>.+?)\s+for\s+(?P<ref>RZP[0-9A-Z]+)\s*\??\s*$", re.I
+)
 
 
 def _read_csv(path):
@@ -26,18 +35,23 @@ def _read_csv(path):
         return list(csv.DictReader(f))
 
 
-def _load():
-    matches = _read_csv(REPORTS_DIR / "matches.csv")
-    exceptions = _read_csv(REPORTS_DIR / "exceptions.csv")
-    summary_path = REPORTS_DIR / "summary.json"
+def _load(reports_dir=None):
+    reports_dir = reports_dir or REPORTS_DIR
+    matches = _read_csv(reports_dir / "matches.csv")
+    exceptions = _read_csv(reports_dir / "exceptions.csv")
+    summary_path = reports_dir / "summary.json"
     summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
     return matches, exceptions, summary
 
 
-def answer(message):
-    matches, exceptions, summary = _load()
+def answer(message, reports_dir=None):
+    matches, exceptions, summary = _load(reports_dir)
     if not summary:
         return "No reconciliation report found yet -- ask me to 'run reconciliation' first."
+
+    compute_match = COMPUTE_PATTERN.match(message)
+    if compute_match:
+        return _answer_compute(compute_match.group("expr"), compute_match.group("ref").upper(), matches)
 
     ref_match = REF_PATTERN.search(message)
     if ref_match:
@@ -70,8 +84,9 @@ def answer(message):
 
     return (
         "I can answer questions about a specific reference (e.g. \"why didn't RZP123456789 "
-        "settle\"), fees, duplicates, drift, match rate, or exceptions -- try one of those, "
-        "or ask me to 'run reconciliation' first if no report exists yet."
+        "settle\"), fees, duplicates, drift, match rate, exceptions, or compute a derived "
+        "value (e.g. \"compute ledger_amount - fee - tax for RZP123456789\") -- try one of "
+        "those, or ask me to 'run reconciliation' first if no report exists yet."
     )
 
 
@@ -91,6 +106,21 @@ def _answer_about_ref(ref, matches, exceptions):
         if e["txn_ref"] == ref:
             return e.get("explanation") or f"{ref} is an unresolved exception ({e['category']})."
     return f"No record of {ref} in the current reconciliation report."
+
+
+def _answer_compute(expr, ref, matches):
+    for m in matches:
+        if m["txn_ref"] == ref:
+            row = {
+                "ledger_amount": m["ledger_amount"], "settlement_amount": m["settlement_amount"],
+                "fee": m["fee"], "tax": m["tax"],
+            }
+            try:
+                result = formula.evaluate(expr, row)
+            except formula.FormulaError as e:
+                return f"Couldn't compute '{expr}' for {ref}: {e}"
+            return f"{expr} for {ref} = Rs.{result:,.2f}"
+    return f"No matched record for {ref} to compute against."
 
 
 def _answer_fees(matches):

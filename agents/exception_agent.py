@@ -19,8 +19,9 @@ def _read_csv(path):
         return list(csv.DictReader(f))
 
 
-def triage():
-    exceptions = _read_csv(REPORTS_DIR / "exceptions.csv")
+def triage(reports_dir=None):
+    reports_dir = reports_dir or REPORTS_DIR
+    exceptions = _read_csv(reports_dir / "exceptions.csv")
     if not exceptions:
         return "No exceptions in the current report -- ask me to 'run reconciliation' first."
 

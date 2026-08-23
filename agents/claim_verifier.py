@@ -54,12 +54,13 @@ def _claim_sentiment(claim):
     return "unclear"
 
 
-def verify(claim):
+def verify(claim, reports_dir=None, ledger_path=None):
     """Returns {"verdict", "message", "ref"}. verdict is one of:
     "confirmed" (claim matches the record), "contradicted" (claim
     conflicts with the record -- needs human review), "no_record"
     (a valid-looking ref with nothing on file), or "no_reference"
     (couldn't find a ref to check at all)."""
+    reports_dir = reports_dir or REPORTS_DIR
     ref_match = REF_PATTERN.search(claim)
     if not ref_match:
         return {
@@ -74,19 +75,19 @@ def verify(claim):
 
     ref = ref_match.group(1).upper()
     sentiment = _claim_sentiment(claim)
-    matches = _read_csv(REPORTS_DIR / "matches.csv")
-    exceptions = _read_csv(REPORTS_DIR / "exceptions.csv")
+    matches = _read_csv(reports_dir / "matches.csv")
+    exceptions = _read_csv(reports_dir / "exceptions.csv")
 
     record = next((m for m in matches if m["txn_ref"] == ref), None)
     if record:
         result = _verdict_against_match(ref, claim, sentiment, record)
-        _log(result, ref)
+        _log(result, ref, ledger_path)
         return result
 
     exc = next((e for e in exceptions if e["txn_ref"] == ref), None)
     if exc:
         result = _verdict_against_exception(ref, claim, sentiment, exc)
-        _log(result, ref)
+        _log(result, ref, ledger_path)
         return result
 
     result = {
@@ -97,7 +98,7 @@ def verify(claim):
             "be verified either way. Needs manual investigation, not an automatic answer."
         ),
     }
-    _log(result, ref)
+    _log(result, ref, ledger_path)
     return result
 
 
@@ -141,7 +142,7 @@ def _verdict_against_exception(ref, claim, sentiment, exc):
     }
 
 
-def _log(result, ref):
+def _log(result, ref, ledger_path=None):
     # a contradiction always needs a human -- confidence 0.0 forces that
     # gate regardless of amount; a confirmed claim is routine, logged at
     # full confidence so it doesn't clutter anyone's review queue
@@ -150,4 +151,5 @@ def _log(result, ref):
         "claim_verifier", "verified_claim",
         f"{result['verdict']} for {ref}",
         confidence=confidence,
+        ledger_path=ledger_path,
     )

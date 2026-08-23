@@ -1,13 +1,19 @@
 """Deterministic + fuzzy matching engine.
 
-Four passes, cheapest and most trustworthy first:
+Five passes, cheapest and most trustworthy first:
   1. exact reference + exact amount
   2. exact reference + exact gross arithmetic (ledger == settlement + fee +
      tax) -- fee and tax are explicit fields on the settlement record (as
      in Razorpay's real settlement.entity), so this is bookkeeping
      verification, not a percentage guess
-  3. fuzzy reference + amount tolerance + date window (timing drift, typo'd refs)
-  4. no reference at all -- amount+date is weak evidence, so this only
+  3. exact reference, 2+ settlement legs whose combined amount (or combined
+     gross) reconciles against one ledger row -- covers both a refund/
+     reversal netting against its original payout, and an invoice
+     legitimately split across multiple partial settlement payouts. Only
+     fires where passes 1-2 genuinely couldn't (they already cover the
+     single-leg case).
+  4. fuzzy reference + amount tolerance + date window (timing drift, typo'd refs)
+  5. no reference at all -- amount+date is weak evidence, so this only
      matches when exactly one candidate exists on each side; anything
      ambiguous is flagged for manual review instead of guessed
 
@@ -27,10 +33,6 @@ REF_SIMILARITY_THRESHOLD = 0.72
 DRIFT_MIN_CLUSTER = 3
 DRIFT_BAND_PCT = 0.005
 NO_REFERENCE_CONFIDENCE = 0.5
-
-
-def _within_tolerance(a, b):
-    return abs(a - b) <= max(AMOUNT_TOLERANCE_FLOOR, a * AMOUNT_TOLERANCE_PCT)
 
 
 def _gross_matches(ledger_amount, settlement_row):
@@ -54,7 +56,18 @@ def _has_ref(row):
     return bool(str(row.get("txn_ref", "")).strip())
 
 
-def match(ledger_rows, settlement_rows):
+def match(ledger_rows, settlement_rows, amount_tolerance_pct=None):
+    """amount_tolerance_pct overrides AMOUNT_TOLERANCE_PCT for pass 4
+    (fuzzy ref + amount tolerance) only -- passes 1-3 and 5 are exact
+    identity checks and aren't affected by it. None keeps the module
+    default; a caller serving a specific client's messier data (see
+    backend/main.py's optional upload field) can widen or tighten it
+    without touching the shared default everyone else gets."""
+    tolerance_pct = AMOUNT_TOLERANCE_PCT if amount_tolerance_pct is None else amount_tolerance_pct
+
+    def within_tolerance(a, b):
+        return abs(a - b) <= max(AMOUNT_TOLERANCE_FLOOR, a * tolerance_pct)
+
     # fee/tax may arrive as CSV strings (e.g. from a real DictReader row) --
     # normalize here so downstream arithmetic never mixes float and str.
     ledger = [dict(r, amount=float(r["amount"]), matched=False) for r in ledger_rows]
@@ -111,7 +124,34 @@ def match(ledger_rows, settlement_rows):
                 srow["matched"] = True
                 break
 
-    # Pass 3: fuzzy ref, amount tolerance, date window (timing drift, typo'd refs)
+    # Pass 3: exact ref, 2+ settlement legs whose combined amount (or
+    # combined gross) reconciles against one ledger row -- a single leg is
+    # already covered by passes 1-2, so this only fires where those
+    # genuinely couldn't. Covers a refund/reversal (negative-amount leg)
+    # netting against its original payout, and a legitimate split payout
+    # (multiple partial settlements for one invoice), both verified
+    # bookkeeping identities rather than a guess, so both earn full
+    # confidence like passes 1-2.
+    legs_by_ref = defaultdict(list)
+    for srow in unmatched(settlement):
+        if _has_ref(srow):
+            legs_by_ref[srow["txn_ref"]].append(srow)
+
+    for lrow in unmatched(ledger):
+        if not _has_ref(lrow):
+            continue
+        legs = [s for s in legs_by_ref.get(lrow["txn_ref"], []) if not s["matched"]]
+        if len(legs) < 2:
+            continue
+        net_amount = round(sum(s["amount"] for s in legs), 2)
+        gross_amount = round(sum(s["amount"] + s.get("fee", 0.0) + s.get("tax", 0.0) for s in legs), 2)
+        if abs(lrow["amount"] - net_amount) < 0.01 or abs(lrow["amount"] - gross_amount) < 0.01:
+            for srow in legs:
+                _record(matches, lrow, srow, "net_settlement", 1.0)
+                srow["matched"] = True
+            lrow["matched"] = True
+
+    # Pass 4: fuzzy ref, amount tolerance, date window (timing drift, typo'd refs)
     for lrow in unmatched(ledger):
         if not _has_ref(lrow):
             continue
@@ -121,7 +161,7 @@ def match(ledger_rows, settlement_rows):
                 continue
             if _date_diff_days(lrow["date"], srow["date"]) > DATE_WINDOW_DAYS:
                 continue
-            if not _within_tolerance(lrow["amount"], srow["amount"]):
+            if not within_tolerance(lrow["amount"], srow["amount"]):
                 continue
             score = difflib.SequenceMatcher(None, str(lrow["txn_ref"]), str(srow["txn_ref"])).ratio()
             if score > best_score:
@@ -132,7 +172,7 @@ def match(ledger_rows, settlement_rows):
             lrow["matched"] = True
             best["matched"] = True
 
-    # Pass 4: no reference on either side. Amount+date alone is coincidental
+    # Pass 5: no reference on either side. Amount+date alone is coincidental
     # evidence, not identifying evidence -- only match when there's exactly
     # one candidate on each side. Two unrelated customers who both happen to
     # pay the same amount on the same day must NOT be silently cross-matched.

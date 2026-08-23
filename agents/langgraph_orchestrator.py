@@ -1,7 +1,7 @@
 """Optional LangGraph tool-calling orchestrator.
 
 This is an alternate router to agents/orchestrator.py's deterministic
-keyword-based one -- not a replacement. It wraps the same five specialist
+keyword-based one -- not a replacement. It wraps the same seven specialist
 agents as LangGraph/LangChain tools and lets an LLM (Claude, via
 langchain-anthropic) decide which one to call from free-form natural
 language, instead of matching against a fixed set of regexes.
@@ -22,14 +22,19 @@ from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
 from langchain_core.tools import tool
 
-from agents import claim_verifier, exception_agent, forecast_agent, qa_agent
-from agents.orchestrator import _format_forecast, _format_summary, _log_consequential_matches
+from agents import (
+    action_ledger, bank_reconciliation_agent, claim_verifier, exception_agent,
+    forecast_agent, qa_agent, tax_agent,
+)
+from agents.orchestrator import (
+    _format_forecast, _format_pending_approvals, _format_summary, _log_consequential_matches,
+)
 from recon import pipeline
 
 MODEL_NAME = "claude-haiku-4-5-20251001"
 
 SYSTEM_PROMPT = (
-    "You are the AI Finance Controller, an orchestrator over five specialist "
+    "You are the AI Finance Controller, an orchestrator over specialist "
     "tools for a payments reconciliation system. Route each user message to "
     "exactly the tool(s) that can actually answer it -- never answer from your "
     "own knowledge, since every real number must come from a tool. If no tool "
@@ -87,7 +92,59 @@ def verify_claim(claim: str) -> str:
     return f"[{result['verdict']}] {result['message']}"
 
 
-TOOLS = [run_reconciliation, cash_forecast, triage_exceptions, answer_settlement_question, verify_claim]
+@tool
+def bank_reconciliation(utr: str = "") -> str:
+    """Check reconciliation between settlement records and the actual bank
+    statement -- the third leg beyond ledger-vs-settlement. Pass a specific
+    UTR to look up one transaction, or leave blank for an overall summary
+    (batch settlements, pending credits, unrecognized bank credits). Use
+    this for any question mentioning "bank", "UTR", or a bank credit."""
+    if utr:
+        return bank_reconciliation_agent.lookup(utr.upper())
+    return bank_reconciliation_agent.triage()
+
+
+@tool
+def tax_reconciliation() -> str:
+    """Check the GST recorded internally on gateway fees against the
+    vendor's periodic tax filing, period by period. Use this for any
+    question about tax, GST, ITC (Input Tax Credit), or tax filing
+    mismatches."""
+    return tax_agent.triage()
+
+
+@tool
+def pending_approvals() -> str:
+    """List every action-ledger entry still waiting on human approval (a
+    low-confidence match or a large amount). Use this when the user asks
+    what needs review, what's pending approval, or for an approval queue."""
+    return _format_pending_approvals(action_ledger.pending_approvals())
+
+
+@tool
+def approve_entry(entry_id: int, note: str = "") -> str:
+    """Approve a specific action-ledger entry by its #id (from
+    pending_approvals) -- confirms a flagged match or action is correct.
+    Use this only when the user explicitly says to approve a specific
+    numbered entry."""
+    entry = action_ledger.approve(entry_id, reviewer="chat_operator", note=note)
+    return f"Entry #{entry_id} approved by chat_operator. ({entry['timestamp']})"
+
+
+@tool
+def reject_entry(entry_id: int, note: str = "") -> str:
+    """Reject a specific action-ledger entry by its #id (from
+    pending_approvals) -- flags a match or action as wrong. Use this only
+    when the user explicitly says to reject a specific numbered entry."""
+    entry = action_ledger.reject(entry_id, reviewer="chat_operator", note=note)
+    return f"Entry #{entry_id} rejected by chat_operator. ({entry['timestamp']})"
+
+
+TOOLS = [
+    run_reconciliation, cash_forecast, triage_exceptions, answer_settlement_question,
+    verify_claim, bank_reconciliation, tax_reconciliation, pending_approvals,
+    approve_entry, reject_entry,
+]
 
 _agent = None
 

@@ -26,9 +26,9 @@ def _read_csv(path):
         return list(csv.DictReader(f))
 
 
-def forecast(horizon_days=7):
-    settlement = _read_csv(DATA_DIR / "settlement.csv")
-    exceptions = _read_csv(REPORTS_DIR / "exceptions.csv")
+def forecast(horizon_days=7, data_dir=None, reports_dir=None):
+    settlement = _read_csv((data_dir or DATA_DIR) / "settlement.csv")
+    exceptions = _read_csv((reports_dir or REPORTS_DIR) / "exceptions.csv")
 
     if not settlement:
         return {"error": "No settlement data found -- ask me to 'run reconciliation' first."}

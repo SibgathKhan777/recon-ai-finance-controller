@@ -51,10 +51,12 @@ def test_run_reconciliation_tool_reruns_the_pipeline():
     assert "Reconciliation run" in result
 
 
-def test_all_five_tools_are_registered():
+def test_all_tools_are_registered():
     assert {t.name for t in lgo.TOOLS} == {
         "run_reconciliation", "cash_forecast", "triage_exceptions",
         "answer_settlement_question", "verify_claim",
+        "bank_reconciliation", "tax_reconciliation",
+        "pending_approvals", "approve_entry", "reject_entry",
     }
 
 

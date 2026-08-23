@@ -1,0 +1,6 @@
+ledger_id,txn_ref,date,amount,merchant,description
+L1,RZP800111222,2026-08-15,2499.00,Kirana Mart,order settlement
+L2,RZP800111333,2026-08-16,899.50,Bluewave Retail,order settlement
+L3,RZP800111444,2026-08-17,15000.00,Solstice Foods,order settlement
+L4,RZP800111555,2026-08-18,349.00,Nimbus Apparel,order settlement
+L5,RZP800111666,2026-08-19,7250.75,Terra Electronics,"order settlement, payment pending"

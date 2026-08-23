@@ -82,6 +82,73 @@ def test_missing_in_ledger():
     assert exceptions[0]["category"] == "missing_in_ledger"
 
 
+def test_split_settlement_nets_against_one_ledger_row():
+    # A legitimate partial-payout split: two settlement legs summing exactly
+    # to the ledger invoice. Neither leg alone matches (400 != 1000, 600 !=
+    # 1000), so passes 1-2 can't catch this -- pass 3 has to sum the group.
+    ledger = [_ledger("L1", "RZP1", "2026-01-01", 1000.0)]
+    settlement = [
+        _settlement("S1", "RZP1", "2026-01-01", 400.0),
+        _settlement("S2", "RZP1", "2026-01-01", 600.0),
+    ]
+    matches, exceptions = matcher.match(ledger, settlement)
+    assert len(matches) == 2
+    assert {m["settlement_id"] for m in matches} == {"S1", "S2"}
+    assert all(m["category"] == "net_settlement" for m in matches)
+    assert all(m["confidence"] == 1.0 for m in matches)
+    assert not exceptions
+
+
+def test_refund_leg_nets_against_original_payout():
+    # A refund/reversal: the original payout plus a negative refund leg,
+    # summing to the net amount actually booked in the ledger.
+    ledger = [_ledger("L1", "RZP1", "2026-01-01", 700.0)]
+    settlement = [
+        _settlement("S1", "RZP1", "2026-01-01", 1000.0),
+        _settlement("S2", "RZP1", "2026-01-01", -300.0),
+    ]
+    matches, exceptions = matcher.match(ledger, settlement)
+    assert len(matches) == 2
+    assert {m["settlement_id"] for m in matches} == {"S1", "S2"}
+    assert all(m["category"] == "net_settlement" for m in matches)
+    assert not exceptions
+
+
+def test_split_settlement_with_fee_uses_gross_sum():
+    # Two legs, net of fee/tax each, whose combined gross reconciles
+    # against the ledger invoice -- same identity check as fee_adjustment,
+    # just summed across legs instead of a single row.
+    ledger = [_ledger("L1", "RZP1", "2026-01-01", 1000.0)]
+    settlement = [
+        _settlement("S1", "RZP1", "2026-01-01", 396.0, fee=3.0, tax=1.0),
+        _settlement("S2", "RZP1", "2026-01-01", 594.0, fee=4.5, tax=1.5),
+    ]
+    matches, exceptions = matcher.match(ledger, settlement)
+    assert len(matches) == 2
+    assert all(m["category"] == "net_settlement" for m in matches)
+
+
+def test_single_leg_is_not_treated_as_net_settlement():
+    # A single settlement leg that simply doesn't match should still fall
+    # through to the fuzzy pass / exceptions -- pass 3 requires 2+ legs.
+    ledger = [_ledger("L1", "RZP1", "2026-01-01", 1000.0)]
+    settlement = [_settlement("S1", "RZP1", "2026-01-01", 400.0)]
+    matches, exceptions = matcher.match(ledger, settlement)
+    assert not any(m["category"] == "net_settlement" for m in matches)
+
+
+def test_custom_amount_tolerance_widens_fuzzy_pass():
+    # Default 2% tolerance rejects this 5% gap; an explicit wider tolerance
+    # (e.g. a client known to have messier fee handling) should accept it.
+    ledger = [_ledger("L1", "RZP1", "2026-01-01", 1000.0)]
+    settlement = [_settlement("S1", "RZP1", "2026-01-01", 950.0)]
+    matches, _ = matcher.match(ledger, settlement)
+    assert not matches
+
+    matches, _ = matcher.match(ledger, settlement, amount_tolerance_pct=0.06)
+    assert len(matches) == 1
+
+
 def test_duplicate_settlement_detected():
     ledger = [_ledger("L1", "RZP1", "2026-01-01", 1000.0)]
     settlement = [

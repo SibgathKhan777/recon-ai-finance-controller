@@ -121,3 +121,90 @@ def test_low_confidence_matches_get_flagged_when_logged(tmp_path, monkeypatch):
     assert len(new_entries) == 1
     assert new_entries[0]["confidence"] == 0.5
     assert new_entries[0]["needs_human_approval"] is True
+
+
+def test_routes_bank_reconciliation_status():
+    result = handle("bank reconciliation status")
+    assert "reconciled cleanly against the bank statement" in result
+
+
+def test_routes_tax_reconciliation():
+    result = handle("show me the tax reconciliation")
+    assert "book" in result.lower() and "filed" in result.lower()
+
+
+def test_bank_and_tax_phrasing_is_not_swallowed_by_the_generic_reconcile_pattern():
+    # regression guard: "reconciliation" contains "reconcil" as a
+    # substring, so RECONCILE_PATTERN (reconcil\w*) would otherwise
+    # intercept these before they ever reach the bank/tax-specific checks.
+    bank_result = handle("bank reconciliation status")
+    assert "Reconciliation run:" not in bank_result
+
+    tax_result = handle("show me the tax reconciliation")
+    assert "Reconciliation run:" not in tax_result
+
+
+def test_routes_bank_utr_lookup():
+    import csv
+    from pathlib import Path
+
+    matches_path = Path(__file__).resolve().parent.parent / "reports" / "matches.csv"
+    utr = next(row["utr"] for row in csv.DictReader(open(matches_path)) if row.get("utr"))
+    result = handle(f"look up UTR {utr}")
+    assert utr in result
+
+
+def test_pending_approvals_and_approve_reject_round_trip(tmp_path):
+    ledger_path = tmp_path / "ledger.jsonl"
+    entry = action_ledger.record(
+        "reconciliation_agent", "matched", "a flagged match", amount=200, confidence=0.5,
+        ledger_path=ledger_path,
+    )
+
+    pending = handle("what needs approval", ledger_path=ledger_path)
+    assert f"#{entry['id']}" in pending
+
+    approved = handle(f"approve #{entry['id']}: looks correct", ledger_path=ledger_path)
+    assert "approved" in approved.lower()
+
+    pending_after = handle("pending approvals", ledger_path=ledger_path)
+    assert "Nothing pending approval" in pending_after
+
+
+def test_reject_with_reason_resolves_the_pending_flag(tmp_path):
+    ledger_path = tmp_path / "ledger.jsonl"
+    entry = action_ledger.record(
+        "reconciliation_agent", "matched", "a flagged match", amount=6000,
+        ledger_path=ledger_path,
+    )
+    result = handle(f"reject #{entry['id']}: amount looks wrong", ledger_path=ledger_path)
+    assert "rejected" in result.lower()
+    assert action_ledger.pending_approvals(ledger_path=ledger_path) == []
+
+
+def test_approve_note_mentioning_bank_is_not_swallowed_by_bank_pattern(tmp_path):
+    # regression guard for a real bug: an approval note is free text a
+    # reviewer writes, and "approve #3: verified against bank statement"
+    # was getting intercepted by BANK_PATTERN (checked before APPROVE_
+    # PATTERN) purely because the note happens to contain the word "bank"
+    # -- the same keyword-collision bug class as the reconcile/reconciliation
+    # bug above, just with approve/reject this time. Caught by actually
+    # sending a realistic reviewer note through handle(), not by assuming
+    # the anchored APPROVE_PATTERN would obviously win.
+    ledger_path = tmp_path / "ledger.jsonl"
+    entry = action_ledger.record(
+        "reconciliation_agent", "matched", "a flagged match", amount=200, confidence=0.5,
+        ledger_path=ledger_path,
+    )
+    result = handle(f"approve #{entry['id']}: verified against bank statement", ledger_path=ledger_path)
+    assert result.startswith(f"Entry #{entry['id']} approved")
+
+
+def test_compute_formula_routes_through_qa_agent():
+    import csv
+    from pathlib import Path
+
+    matches_path = Path(__file__).resolve().parent.parent / "reports" / "matches.csv"
+    row = next(r for r in csv.DictReader(open(matches_path)) if r["category"] == "fee_adjustment")
+    result = handle(f"compute ledger_amount - fee - tax for {row['txn_ref']}")
+    assert "=" in result and "Rs." in result

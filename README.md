@@ -26,8 +26,10 @@ bounded audit trail — not a single script that does one thing.
 Every payments business runs a version of the same loop: the ledger says
 one thing, the settlement file says another, cash needs to be forecast
 under uncertainty, someone has to answer "why didn't this settle" on
-demand, and a customer or merchant's claim about a payment needs checking
-against reality rather than taken on faith. Five agents split that work:
+demand, money that should have hit the bank needs confirming, tax filed
+by a vendor needs checking against what your own books show, and a
+customer or merchant's claim about a payment needs checking against
+reality rather than taken on faith. Seven agents split that work:
 
 - **Reconciliation Agent** — matches ledger against settlement across
   three passes (exact → gross arithmetic → fuzzy), and catches *systemic*
@@ -47,6 +49,14 @@ against reality rather than taken on faith. Five agents split that work:
   actual reconciliation record. Never declares anyone dishonest — a
   mismatch is flagged for human review via the same action ledger, not
   auto-resolved.
+- **Bank Reconciliation Agent** — the third reconciliation leg: checks
+  settlement records against the actual bank statement by UTR, correctly
+  handling batched settlements (many payouts landing in one bank credit)
+  instead of flagging every one as a false mismatch.
+- **Tax Reconciliation Agent** — the fourth leg: checks GST recorded on
+  gateway fees against a vendor's periodic tax filing, period by period,
+  and flags a cross-period cutoff shift as plausible rather than assuming
+  the worse explanation.
 
 ## Architecture
 
@@ -61,15 +71,18 @@ against reality rather than taken on faith. Five agents split that work:
                     │  (agent_cli.py / app.py)  │   always inspectable, never
                     └────────────┬─────────────┘   a black box
                                   │
-     ┌───────────────┬───────────┼───────────┬───────────────┬────────────────┐
-     ▼               ▼           ▼           ▼               ▼
-Reconciliation   Settlement   Cash        Exception &     Claim
-Agent            Q&A Agent   Forecaster   Anomaly Agent   Verification Agent
-(recon/*)        (agents/    (agents/     (agents/        (agents/
-                 qa_agent)   forecast_    exception_       claim_verifier)
-                             agent)       agent)
-     │               │           │           │               │
-     └───────────────┴───────────┴───────────┴───────────────┘
+     ┌───────────────┬───────────┼───────────┬───────────────┬────────────────┬────────────────┐
+     ▼               ▼           ▼           ▼               ▼                ▼                ▼
+Reconciliation   Settlement   Cash        Exception &     Claim            Bank             Tax
+Agent            Q&A Agent   Forecaster   Anomaly Agent   Verification     Reconciliation   Reconciliation
+(recon/*)        (agents/    (agents/     (agents/        Agent            Agent            Agent
+                 qa_agent)   forecast_    exception_      (agents/         (agents/         (agents/
+                             agent)       agent)          claim_verifier)  bank_reconcil-   tax_agent,
+                                                                            iation_agent,    recon/
+                                                                            recon/           tax_matcher)
+                                                                            bank_matcher)
+     │               │           │           │               │                │                │
+     └───────────────┴───────────┴───────────┴───────────────┴────────────────┴────────────────┘
                                   ▼
                     Shared Action Ledger (agents/action_ledger.py)
                     every action logged; amount ≥ Rs.5,000, confidence
@@ -78,11 +91,48 @@ Agent            Q&A Agent   Forecaster   Anomaly Agent   Verification Agent
 ```
 
 The Reconciliation Agent's own output (`reports/exceptions.csv`,
-`summary.json`, `matches.csv`) is the shared substrate the other four
-agents read from — the Cash Forecaster's "at risk" figure and drift
-warning, and the Claim Verification Agent's factual check, all come
-directly from the Reconciliation Agent's own records, not a separate
-estimate.
+`summary.json`, `matches.csv`) is the shared substrate the other agents
+read from — the Cash Forecaster's "at risk" figure and drift warning, and
+the Claim Verification Agent's factual check, all come directly from the
+Reconciliation Agent's own records, not a separate estimate. The Bank and
+Tax Reconciliation agents are the exception: they read `settlement.csv`
+plus their own third/fourth data source (`bank_statement.csv`,
+`tax_filing.csv`) directly, since ledger-vs-settlement matching has
+nothing to say about whether money actually landed in the bank or was
+filed correctly for tax.
+
+### Multi-source reconciliation: the third and fourth legs
+
+The original build only reconciled ledger ↔ settlement — a real gap
+against the track's own "Multi-source reconciliation" example direction,
+which implies more than two sources. Two more legs were added, each
+shaped by a specific researched failure mode rather than a naive 1:1
+diff:
+
+**Bank reconciliation** (`recon/bank_matcher.py`) matches settlement
+records against an actual bank statement by UTR — but real payment
+gateways batch multiple settlement payouts into a single bank credit
+(e.g. Razorpay's daily/weekly settlement cycles), so a naive
+one-settlement-per-bank-row check would flag every batched settlement as
+a false "amount mismatch." The matcher groups settlement rows by UTR
+first and compares the *sum* against the bank credit, correctly
+recognizing an N-to-1 batch as reconciled instead of N false exceptions.
+It also distinguishes "not arrived yet" (`bank_credit_pending`) from "no
+settlement explains this money" (`unrecognized_bank_credit`) — different
+problems that need different follow-up, not one generic "mismatch."
+
+**Tax reconciliation** (`recon/tax_matcher.py`) checks GST recorded on
+gateway fees against a vendor's periodic tax filing — modeled on India's
+real GSTR-2A/2B mechanism, where Input Tax Credit must be claimed against
+a *frozen monthly snapshot* (2B), not a live running total (2A). That
+period-level framing has a real, stated limit: a transaction that settles
+near month-end can have its GST reported by the vendor in the *next*
+period's filing (a cross-period cutoff shift), and from aggregate
+period totals alone that looks identical to a genuinely missing credit.
+The matcher doesn't pretend to resolve that ambiguity from data it
+doesn't have — it flags the mismatch, states both plausible causes, and
+says invoice-level detail is what's actually needed to tell them apart,
+rather than overclaiming a root cause the period-level data can't prove.
 
 The matching core stays deliberately **not** LLM-based — exact/fuzzy/
 tolerance matching is cheap, fast, and auditable. The LLM (optional,
@@ -98,8 +148,10 @@ key it's just `handle` under a different name — same deterministic
 regex router, same behavior, no change. With `ANTHROPIC_API_KEY` set (and
 the optional `langgraph` + `langchain` + `langchain-anthropic` packages,
 already in `requirements.txt`), it upgrades to
-`agents/langgraph_orchestrator.py`: the same five agents wrapped as
-LangChain tools, with an LLM (Claude Haiku, via `langchain.agents.
+`agents/langgraph_orchestrator.py`: the same seven agents wrapped as
+LangChain tools (plus three approval-workflow tools wrapping
+`action_ledger` directly -- `pending_approvals`, `approve_entry`,
+`reject_entry`), with an LLM (Claude Haiku, via `langchain.agents.
 create_agent`) deciding which one to call from the raw message instead of
 matching against a fixed regex list.
 
@@ -117,6 +169,60 @@ function tested directly, and the full graph is tested against
 `langchain_core`'s `FakeMessagesListChatModel`, which scripts a tool call
 deterministically so the actual `create_agent`/tool-dispatch machinery
 gets exercised without a network call or a key.
+
+### Closing gaps found against Cointab (a real competitor)
+
+A competitive scan of [Cointab](https://www.cointab.net/) — a reconciliation
+SaaS with a mature no-code rule engine, pre-built vertical templates, and
+SFTP/API/email data automation — surfaced four features this project
+didn't have, closed here:
+
+- **Net/contra settlement matching** (`recon/matcher.py`, pass 3). Cointab
+  explicitly supports "contra and net matching" for refunds, reversals, and
+  split payouts; this project's matcher previously only matched a single
+  settlement leg per ledger row. Now it sums 2+ settlement legs sharing a
+  reference and checks whether the sum (or gross-adjusted sum) reconciles
+  against the ledger row — covering both a refund netting against its
+  original payout and a legitimate multi-leg partial payout, both as a
+  verified identity (`confidence: 1.0`), not a guess. Demoable via
+  `python cli.py demo` directly (no `--corrupt` flag needed) — look for
+  `category: net_settlement` in `reports/matches.csv`.
+- **Configurable match tolerance.** Cointab's pitch is a no-code rule
+  engine business users configure themselves, versus this project's
+  previously-hardcoded 2% fuzzy-match tolerance. `recon/matcher.py::match`
+  now takes an optional `amount_tolerance_pct`, threaded through
+  `pipeline.run_uploaded` and exposed as an optional `tolerance_pct` field
+  on `backend/main.py`'s `/upload` endpoint (and a matching input in the
+  chat UI's upload panel) — a genuine per-client override, not just
+  internal plumbing nobody can reach.
+- **An approval workflow** (`agents/action_ledger.py::approve`/`reject`/
+  `pending_approvals`). Cointab has multi-level approvals as a stated
+  governance feature; this project had confidence/amount gating
+  (`needs_human_approval`) but nothing to actually resolve a flagged entry.
+  Approving or rejecting never edits the original entry — it appends a new
+  one referencing it by `id`, because a real audit log has to stay
+  append-only or "what did it say at the time" stops being answerable.
+  Reachable from chat: `pending approvals`, `approve #3`, `reject #3:
+  reason`.
+- **A safe derived-column formula evaluator** (`recon/formula.py`).
+  Cointab's "AI formula builder" generates Excel-style formulas from a
+  natural-language ask via an LLM. This evaluates a formula
+  deterministically instead — `+`, `-`, `*`, `/` over a fixed field
+  whitelist, built on Python's `ast` module rather than `eval()` (running
+  an attacker-supplied string through `eval()` is a code-execution
+  vulnerability, not a formula feature — verified directly with a
+  `__import__('os').system(...)` test case that's rejected, not executed).
+  Reachable from chat: `compute ledger_amount - fee - tax for
+  RZP123456789`.
+
+What's deliberately still not built, and why: a no-code rule-configuration
+*UI* (the tolerance override above is a real parameter, not a business-user
+-facing rule builder), SFTP/email/DB-connector data automation (needs real
+external infrastructure this project can't stand up and verify), and
+Cointab's 20 pre-built vertical templates (school fees, real-money gaming,
+travel, etc.) — those are thin wrappers around the same matching engine
+with different column names, not a capability gap worth cloning one by one.
+See "Known limitations" below for the complete list.
 
 ## Quickstart
 
@@ -144,6 +250,36 @@ templates, and to upgrade both `agent_cli.py` and `app.py` to the
 LangGraph tool-calling router (see "Optional: LangGraph tool-calling
 router" above) instead of the deterministic one.
 
+### Chat UI: a multi-client product, not a single shared dashboard
+
+`app.py` (Streamlit) is one shared dashboard for one operator. `backend/`
++ `frontend/` is a different shape entirely: a ChatGPT-style chat where
+each browser session is its own isolated client — upload your own CSVs
+(or click "Try synthetic demo data"), chat with the same seven agents,
+and download your own result files, all without ever seeing or touching
+another session's data or reports.
+
+```bash
+pip install -r requirements.txt                            # adds fastapi/uvicorn
+uvicorn backend.main:app --port 8000     # terminal 1: the session API
+cd frontend && npm install && npm run dev    # terminal 2: the chat UI, http://localhost:3000
+```
+
+Isolation is real, not cosmetic: every `recon/pipeline.py` function and
+every `agents/*.py` entry point takes optional `data_dir`/`reports_dir`/
+`ledger_path` parameters (defaulting to the shared paths `cli.py`/`app.py`
+already used, so nothing else changed behavior). `backend/main.py` hands
+each session its own `data/sessions/{id}` and `reports/sessions/{id}`
+pair — verified directly by running two concurrent sessions (one loading
+demo data, one uploading a 1-row CSV) and confirming neither's chat
+answers ever reflected the other's numbers, not just assumed from the
+parameter threading being correct.
+
+Session state itself (the id → directory mapping) is an in-memory dict —
+correct for a single-process demo, honestly not a persistence layer: a
+server restart forgets every session, and it can't be horizontally scaled
+without moving that registry to shared storage first.
+
 Try in `agent_cli.py`:
 
 ```
@@ -154,6 +290,11 @@ Try in `agent_cli.py`:
 > show duplicate exceptions
 > triage exceptions
 > verify claim: I never received my payout for RZP123456789
+> bank reconciliation status
+> tax reconciliation
+> compute ledger_amount - fee - tax for RZP123456789   (use a real fee_adjustment ref)
+> pending approvals
+> approve #3: confirmed against bank statement
 ```
 
 ## Commands
@@ -163,20 +304,22 @@ Try in `agent_cli.py`:
 | `python cli.py demo` | generate data + run the reconciliation pipeline + print summary |
 | `python cli.py generate --corrupt currency` | regenerate data with an injected batch-level anomaly |
 | `python cli.py run` | re-run the pipeline against already-generated data |
-| `python agent_cli.py` | interactive terminal chat across all five agents |
+| `python agent_cli.py` | interactive terminal chat across all seven agents |
 | `streamlit run app.py` | dashboard: metrics, exception explorer, cash forecast chart, agent chat box, claim verification tab |
-| `python -m pytest` | 121 tests: unit tests across the matcher/scorer/agents, plus end-to-end user-journey tests that spawn the real CLI as subprocesses |
+| `uvicorn backend.main:app --port 8000` | session API behind the chat UI -- one isolated data/reports directory pair per client |
+| `cd frontend && npm run dev` | ChatGPT-style chat UI: upload CSVs or load demo data, chat, download your own result files |
+| `python -m pytest` | 174 tests: unit tests across the matcher/scorer/agents, plus end-to-end user-journey tests that spawn the real CLI as subprocesses |
 
 ## Honest numbers, not a demo trick
 
 `python cli.py demo` prints something like:
 
 ```
-Ledger rows:      145
-Settlement rows:  145
-Matched pairs:    136
+Ledger rows:      147
+Settlement rows:  149
+Matched pairs:    140
 Exceptions:       18
-Match rate:       93.8%
+Match rate:       95.2%
 Overall accuracy vs ground truth: 100.0%
 
 Per-category accuracy:
@@ -188,6 +331,7 @@ Per-category accuracy:
   matched_no_reference           2/2    (100.0%)
   missing_in_ledger              4/4    (100.0%)
   missing_in_settlement          7/7    (100.0%)
+  net_settlement                 4/4    (100.0%)
   timing                        12/12   (100.0%)
 ```
 
@@ -336,6 +480,33 @@ importances converging on the same signal (`gross_reconciles`, reference
 similarity) the hand-written rules already use — a genuinely informative
 result, not a number chased to look good.
 
+**8. The bank/tax router had the mirror-image bug of #2.** Adding
+`BANK_PATTERN`/`TAX_PATTERN` for the new agents, `RECONCILE_PATTERN`
+(`reconcil\w*`) — checked first in `handle()` — silently intercepted them,
+because "reconciliation" *contains* "reconcil" as a substring. So typing
+"bank reconciliation status" or "show me the tax reconciliation" ran the
+full ledger-vs-settlement pipeline and returned its generic summary
+instead of ever reaching the bank/tax agents. Bug #2 was "reconcile isn't
+a substring of reconciliation, so a specific match under-fires"; this one
+is the opposite — "reconcil *is* a substring, so a broad match over-fires"
+— caught the same way, by actually calling `handle()` with the exact
+phrases a user would type rather than trusting that non-overlapping-
+looking regexes don't overlap. Fixed by checking the more specific
+bank/tax patterns before the generic reconcile pattern.
+
+**9. Multi-client isolation was verified, not assumed, before shipping.**
+Threading `data_dir`/`reports_dir`/`ledger_path` through nine files (all
+of `recon/pipeline.py` and every `agents/*.py` entry point) is exactly
+the kind of change that looks obviously correct and silently isn't —
+one missed default, one function that still reads its own module-level
+constant instead of the passed-in path, and two clients silently share
+data. Verified directly: two concurrent sessions against the running
+FastAPI backend, one loading a 145-row synthetic demo batch, one
+uploading a 1-row CSV, each asked "what is the match rate" before and
+after the other's action. The demo session's answer never changed after
+the 1-row upload, and the 1-row session started with an honest "no report
+found yet" rather than inheriting the demo session's numbers.
+
 ## Known limitations
 
 - The orchestrator's routing is keyword-based, not intent-classified by an
@@ -356,14 +527,27 @@ result, not a number chased to look good.
   a float's precision is nowhere near this system's actual comparison
   tolerances (checked directly, not assumed), so this is a representation
   choice, not a live correctness bug.
-- No authentication or role-based access control on the dashboard — anyone
-  who can reach it sees and can trigger everything. Real reconciliation
-  software (SOX-relevant) requires this; out of scope for a demo.
+- No authentication or role-based access control on the dashboard or chat
+  UI — anyone who can reach it (or guess a session id) sees and can
+  trigger everything for that session. Real reconciliation software
+  (SOX-relevant) requires this; out of scope for a demo. This includes the
+  approval workflow specifically: `approve #<id>`/`reject #<id>` always
+  logs the reviewer as the literal string `"chat_operator"` — there's no
+  real identity behind it, so the audit trail records *that* something was
+  approved and *when*, but not genuinely *by whom*. A real deployment
+  needs actual reviewer identity before that log means anything for
+  compliance.
 - Single currency only — no FX handling for multi-currency merchants.
 - Batch-only: reconciliation runs on a static CSV snapshot, not a live
-  webhook feed. The `utr` field is modeled specifically so this could
-  extend to true 3-way reconciliation (ledger ↔ settlement ↔ bank
-  statement) — that third leg isn't built.
+  webhook feed.
+- The tax matcher's period-level comparison genuinely cannot distinguish
+  a cross-period filing shift from a truly missing credit using only
+  aggregate period totals — stated as a real limit in its own docstring
+  rather than a diagnosis the data doesn't support (see "Multi-source
+  reconciliation" above).
+- `backend/main.py`'s session registry is an in-memory dict, not a
+  database — sessions (and their uploaded data) don't survive a server
+  restart, and the process can't be horizontally scaled as-is.
 
 ## Project layout
 
@@ -371,20 +555,35 @@ result, not a number chased to look good.
 cli.py                    reconciliation-only entry point
 agent_cli.py               multi-agent terminal chat entry point
 app.py                     Streamlit dashboard + agent chat box
+backend/
+  main.py                  FastAPI session API behind frontend/ -- per-client
+                           data_dir/reports_dir isolation, upload/chat/download
+frontend/                  Next.js chat UI: upload CSVs or load demo data,
+                           chat with all seven agents, download result files
 recon/
   generate_data.py         synthetic ledger + settlement + ground truth
-  matcher.py                3-pass matching engine + batch-drift detector
-  explainer.py               LLM / template exception explanations
-  scorer.py                    accuracy scoring against ground truth
-  pipeline.py                   orchestrates the above, writes reports/
+                           (+ bank statement + tax filing, seeded scenarios)
+  matcher.py                5-pass matching engine (now incl. net/contra
+                           settlement) + batch-drift detector, configurable
+                           amount_tolerance_pct
+  bank_matcher.py             settlement vs bank statement, UTR + batch-aware
+  tax_matcher.py                 settlement tax vs periodic tax filing
+  formula.py                       safe derived-column formula evaluator
+                                   (ast-based, no eval())
+  explainer.py                       LLM / template exception explanations
+  scorer.py                            accuracy scoring against ground truth
+  pipeline.py                            orchestrates the above, writes reports/
 agents/
   orchestrator.py           routes a message to the right specialist
-  qa_agent.py                 grounded settlement Q&A
+  qa_agent.py                 grounded settlement Q&A + compute <formula>
   forecast_agent.py            cash forecast + at-risk amount
   exception_agent.py            exception triage / prioritization
   claim_verifier.py              checks a user's claim against the record
-  langgraph_orchestrator.py        optional LLM tool-calling router
-  action_ledger.py                   shared, bounded, gated audit trail
+  bank_reconciliation_agent.py    bank_matcher.py results, in plain English
+  tax_agent.py                      tax_matcher.py results, in plain English
+  langgraph_orchestrator.py          optional LLM tool-calling router
+  action_ledger.py                     shared, bounded, gated audit trail --
+                                       approve()/reject()/pending_approvals()
 ml/                        standalone trained classifier -- see ml/README.md
   features.py               pairwise feature extraction
   dataset.py                  builds a labeled set from generate_data.py
@@ -392,7 +591,7 @@ ml/                        standalone trained classifier -- see ml/README.md
   predict.py                      inference helper, not wired into the app
   push_to_huggingface.py            pushes to your own HF Hub repo
   model.skops, MODEL_CARD.md          the trained artifact + its writeup
-tests/                     121 pytest tests: unit-level across recon/, agents/,
+tests/                     174 pytest tests: unit-level across recon/, agents/,
                            and ml/, plus test_user_journey.py -- real subprocess
                            sessions that act as a user typing into cli.py / agent_cli.py
 ```
@@ -402,7 +601,7 @@ tests/                     121 pytest tests: unit-level across recon/, agents/,
 - **Project name**: Ledger — a multi-agent AI Finance Controller
 - **What it solves**: see "What it solves" above
 - **Track**: AI Finance Controller
-- **What broke, and how you got out**: see "What broke" above — both bugs
-  are real and both were caught by actually running the thing, not by
-  reading the code. Adapt to your own words, and add your own story once
-  you've broken something yourself.
+- **What broke, and how you got out**: see "What broke" above — every one
+  is real and was caught by actually running the thing, not by reading
+  the code. Adapt to your own words, and add your own story once you've
+  broken something yourself.
