@@ -280,6 +280,22 @@ correct for a single-process demo, honestly not a persistence layer: a
 server restart forgets every session, and it can't be horizontally scaled
 without moving that registry to shared storage first.
 
+**Reconciliation report view.** Loading demo data, uploading a CSV, or
+sending "run reconciliation" in chat doesn't just return a text summary
+-- it also renders a Cointab-style report inline: four summary cards
+(Total / Fully matched / Partially matched / Unmatched, each with a
+ledger total, a settlement total, and the difference between them),
+tabbed match tables, and side-by-side Ledger/Settlement tables for the
+unmatched rows. `recon/report.py::build_report` computes this from the
+same `matches.csv`/`exceptions.csv` every other agent already reads --
+"fully matched" is deliberately narrow (only the `exact` category; a fee
+deduction, timing shift, corrected reference, or netted refund/split
+settlement all count as "partially matched" since they required some
+variance to reconcile), and it correctly dedupes a `net_settlement`
+match's ledger side so a 2-leg split payout isn't counted as two ledger
+rows. The frontend's theme is a light teal/white palette to match, not
+the ChatGPT-style dark chat bubbles from the first version.
+
 Try in `agent_cli.py`:
 
 ```
@@ -308,7 +324,7 @@ Try in `agent_cli.py`:
 | `streamlit run app.py` | dashboard: metrics, exception explorer, cash forecast chart, agent chat box, claim verification tab |
 | `uvicorn backend.main:app --port 8000` | session API behind the chat UI -- one isolated data/reports directory pair per client |
 | `cd frontend && npm run dev` | ChatGPT-style chat UI: upload CSVs or load demo data, chat, download your own result files |
-| `python -m pytest` | 174 tests: unit tests across the matcher/scorer/agents, plus end-to-end user-journey tests that spawn the real CLI as subprocesses |
+| `python -m pytest` | 180 tests: unit tests across the matcher/scorer/agents, plus end-to-end user-journey tests that spawn the real CLI as subprocesses |
 
 ## Honest numbers, not a demo trick
 
@@ -560,6 +576,8 @@ backend/
                            data_dir/reports_dir isolation, upload/chat/download
 frontend/                  Next.js chat UI: upload CSVs or load demo data,
                            chat with all seven agents, download result files
+  app/report-view.tsx      Cointab-style Total/Fully/Partially/Unmatched
+                           report cards + tabs, rendered inline in chat
 recon/
   generate_data.py         synthetic ledger + settlement + ground truth
                            (+ bank statement + tax filing, seeded scenarios)
@@ -570,9 +588,11 @@ recon/
   tax_matcher.py                 settlement tax vs periodic tax filing
   formula.py                       safe derived-column formula evaluator
                                    (ast-based, no eval())
-  explainer.py                       LLM / template exception explanations
-  scorer.py                            accuracy scoring against ground truth
-  pipeline.py                            orchestrates the above, writes reports/
+  report.py                          buckets matches/exceptions into the
+                                     Total/Fully/Partially/Unmatched report
+  explainer.py                         LLM / template exception explanations
+  scorer.py                              accuracy scoring against ground truth
+  pipeline.py                              orchestrates the above, writes reports/
 agents/
   orchestrator.py           routes a message to the right specialist
   qa_agent.py                 grounded settlement Q&A + compute <formula>
@@ -591,7 +611,7 @@ ml/                        standalone trained classifier -- see ml/README.md
   predict.py                      inference helper, not wired into the app
   push_to_huggingface.py            pushes to your own HF Hub repo
   model.skops, MODEL_CARD.md          the trained artifact + its writeup
-tests/                     174 pytest tests: unit-level across recon/, agents/,
+tests/                     180 pytest tests: unit-level across recon/, agents/,
                            and ml/, plus test_user_journey.py -- real subprocess
                            sessions that act as a user typing into cli.py / agent_cli.py
 ```

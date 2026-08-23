@@ -28,7 +28,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from agents import orchestrator
-from recon import generate_data, pipeline
+from recon import generate_data, pipeline, report as report_module
 
 ROOT = Path(__file__).resolve().parent.parent
 SESSIONS_DATA_ROOT = ROOT / "data" / "sessions"
@@ -73,6 +73,19 @@ def _session_dirs(session_id):
     reports_dir = SESSIONS_REPORTS_ROOT / session_id
     ledger_path = reports_dir / "action_ledger.jsonl"
     return data_dir, reports_dir, ledger_path
+
+
+def _read_report_csv(path):
+    if not path.exists():
+        return []
+    with open(path, newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def _build_report(reports_dir):
+    matches = _read_report_csv(reports_dir / "matches.csv")
+    exceptions = _read_report_csv(reports_dir / "exceptions.csv")
+    return report_module.build_report(matches, exceptions)
 
 
 def _read_upload_csv(upload: UploadFile, raw: bytes):
@@ -138,6 +151,7 @@ def load_demo_data(session_id: str):
             "'bank reconciliation status', or 'tax reconciliation'."
         ),
         "summary": summary,
+        "report": _build_report(reports_dir),
     }
 
 
@@ -176,7 +190,14 @@ async def upload_data(
             "Ask me about a specific reference, or try 'triage exceptions' or 'forecast cash'."
         ),
         "summary": summary,
+        "report": _build_report(reports_dir),
     }
+
+
+# Chat messages that (re-)run the full pipeline should refresh the report
+# view too, not just return a text summary -- the report is a rendering of
+# the same matches.csv/exceptions.csv the chat reply is already describing.
+_REPORT_REFRESHING_PATTERN = orchestrator.RECONCILE_PATTERN
 
 
 @app.post("/api/sessions/{session_id}/chat")
@@ -185,7 +206,18 @@ def chat(session_id: str, body: ChatRequest):
     reply = orchestrator.handle(
         body.message, data_dir=data_dir, reports_dir=reports_dir, ledger_path=ledger_path,
     )
-    return {"reply": reply}
+    response = {"reply": reply}
+    if _REPORT_REFRESHING_PATTERN.search(body.message) and (reports_dir / "matches.csv").exists():
+        response["report"] = _build_report(reports_dir)
+    return response
+
+
+@app.get("/api/sessions/{session_id}/report")
+def get_report(session_id: str):
+    _, reports_dir, _ = _session_dirs(session_id)
+    if not (reports_dir / "matches.csv").exists():
+        raise HTTPException(status_code=404, detail="No reconciliation report yet for this session")
+    return _build_report(reports_dir)
 
 
 @app.get("/api/sessions/{session_id}/files")
